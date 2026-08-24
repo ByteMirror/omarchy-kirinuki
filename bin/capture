@@ -28,25 +28,24 @@
 
 set -uo pipefail
 
+here=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd) || exit 1
+source "$here/../lib/guard.sh" || exit 1
+
 MODE="${1:-smart}"
+case "$MODE" in smart | region | windows | fullscreen) ;; *) exit 2 ;; esac
+
 QUALITY="${KIRINUKI_JPEG_QUALITY:-92}"
 KEEP_MINUTES="${KIRINUKI_KEEP_MINUTES:-1440}"
-STAGING="${KIRINUKI_STAGING_DIR:-${XDG_RUNTIME_DIR:-/tmp}/kirinuki}"
 
-here=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd) || exit 1
-
-mkdir -p "$STAGING" || exit 1
+# Staged captures are private: the dir is created 0700 and refused outright if
+# it already exists as somebody else's, which is the case that matters when
+# $XDG_RUNTIME_DIR is missing and the fallback lands in a shared /tmp.
+STAGING=$(kirinuki_stage_ensure) || exit 1
 
 # Unsaved captures are disposable; drop yesterday's so the scratch dir cannot
 # grow without bound. A pinned shot older than this loses its image, but pins
 # do not survive a shell restart anyway.
 find "$STAGING" -maxdepth 1 -type f -mmin "+$KEEP_MINUTES" -delete 2>/dev/null
-
-# Where a Save would put it, used only by the no-panel fallback below.
-screenshot_dir() {
-  [[ -f ~/.config/user-dirs.dirs ]] && source ~/.config/user-dirs.dirs
-  printf '%s' "${OMARCHY_SCREENSHOT_DIR:-${XDG_PICTURES_DIR:-$HOME/Pictures}}"
-}
 
 # `save` prints the saved path; take the last line in case anything else
 # (e.g. the "created screenshot directory" notice) is written first.
@@ -54,7 +53,12 @@ shot=$(OMARCHY_SCREENSHOT_DIR="$STAGING" omarchy-capture-screenshot "$MODE" save
 
 # Empty output means the selection was cancelled, or a running slurp was
 # dismissed -- both are a normal no-op, not a failure.
-[[ -n $shot && -f $shot ]] || exit 0
+[[ -n $shot ]] || exit 0
+
+# Everything downstream -- the panel, the editor, OCR -- trusts what this
+# prints, so the capture goes through the same guard as any other path before
+# it gets that standing.
+shot=$(kirinuki_safe_image "$shot") || exit 0
 
 # Opt-in JPEG. Off by default: it costs an ImageMagick dependency and changes
 # the format of every screenshot, which is a decision for the user rather than
@@ -64,7 +68,8 @@ shot=$(OMARCHY_SCREENSHOT_DIR="$STAGING" omarchy-capture-screenshot "$MODE" save
 # handles either format.
 if [[ ${KIRINUKI_JPEG:-0} == 1 ]] && command -v magick >/dev/null 2>&1; then
   jpg="${shot%.png}.jpg"
-  if magick "$shot" -background white -flatten -quality "$QUALITY" "$jpg" 2>/dev/null && [[ -s $jpg ]]; then
+  if kirinuki_magick "$(kirinuki_spec "$shot")" -background white -flatten \
+    -quality "$QUALITY" "jpg:$jpg" 2>/dev/null && kirinuki_output_ok "$jpg"; then
     rm -f "$shot"
     shot="$jpg"
   else
@@ -76,17 +81,14 @@ fi
 # capture would sit in a scratch dir the user never sees, so fall back to the
 # stock behaviour: keep the file and say where it went.
 if ! "$here/summon" "$shot"; then
-  dir=$(screenshot_dir)
+  dir=$(kirinuki_screenshot_dir)
   mkdir -p "$dir"
   dest="$dir/$(basename "$shot")"
   mv -f "$shot" "$dest" 2>/dev/null || dest="$shot"
 
   # Clipboard gets PNG whatever the file is: wl-copy advertises only the type
   # it is given and most apps ask for image/png when pasting.
-  case "${dest,,}" in
-    *.png) wl-copy --type image/png <"$dest" >/dev/null 2>&1 ;;
-    *) magick "$dest" png:- 2>/dev/null | wl-copy --type image/png >/dev/null 2>&1 ;;
-  esac
+  kirinuki_copy_png "$dest" >/dev/null 2>&1
 
   omarchy-notification-send "Screenshot saved to clipboard and file" "$(basename "$dest")" \
     --image "$dest" \

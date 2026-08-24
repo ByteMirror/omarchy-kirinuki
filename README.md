@@ -113,8 +113,13 @@ Environment variables, all optional:
 | --- | --- | --- |
 | `KIRINUKI_JPEG` | `0` | Set to `1` to transcode captures to JPEG |
 | `KIRINUKI_JPEG_QUALITY` | `92` | JPEG quality when the above is on |
-| `KIRINUKI_STAGING_DIR` | `$XDG_RUNTIME_DIR/kirinuki` | Where captures wait |
+| `KIRINUKI_STAGING_DIR` | `$XDG_RUNTIME_DIR/kirinuki` | Where captures wait (created private, `0700`) |
 | `KIRINUKI_KEEP_MINUTES` | `1440` | Age at which an unsaved capture is dropped |
+| `KIRINUKI_MAX_BYTES` | `67108864` | Largest capture, in bytes, that will be decoded or written |
+| `KIRINUKI_MAX_PIXELS` | `80000000` | Largest capture, in pixels, that will be decoded |
+| `KIRINUKI_MAX_DIMENSION` | `32768` | Longest side, in pixels, that will be decoded |
+| `KIRINUKI_MAX_TEXT_BYTES` | `1048576` | Most OCR text that may reach the clipboard |
+| `KIRINUKI_TIMEOUT` | `20` | Seconds any one image or OCR run may take |
 
 Omarchy's own `OMARCHY_SCREENSHOT_DIR`, `OMARCHY_SCREENSHOT_EDITOR` and
 `OMARCHY_OCR_LANGS` are honoured as they are; this plugin does not shadow them.
@@ -163,8 +168,18 @@ Bare letters are used as shortcuts on purpose: Hyprland grabs its own binds
 before a focused surface sees the key, and every stock Omarchy bind carries at
 least `SUPER`, so a single letter is unambiguous while the card has focus.
 
-`omarchy-shell kirinuki probe` prints the panel's resolved geometry
-and state — useful in a bug report.
+The panel only ever acts on a capture of yours. A path reaching it — over the
+shell's IPC, from a keybind, from anywhere else — is accepted only if it is an
+existing regular file you own, not a symlink, named `.png`/`.jpg`/`.jpeg`, and
+inside the staging dir or your screenshots folder; `lib/guard.sh` is the single
+place that decides. Decoding is bounded as well: the size, pixel, dimension,
+output-size and wall-clock ceilings in the table above apply to every image and
+OCR run, so a malformed or hostile file fails instead of taking the desktop
+shell down with it.
+
+`omarchy-shell kirinuki state` answers `open` or `closed`, and
+`omarchy-shell kirinuki ping` answers `ok` — enough to tell a wedged panel
+from a missing one in a bug report.
 
 ## License
 

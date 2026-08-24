@@ -3,39 +3,26 @@
 # Side-effect actions for the screenshot preview panel. The QML side stays
 # declarative and hands work here so shell quoting lives in one place.
 #
+# Every action starts by putting its argument through lib/guard.sh: the panel's
+# IPC is reachable by anything that can talk to the shell, so a path only
+# counts if it is a staged or saved capture of ours, and only after it has been
+# shown to decode within the guard's size, dimension and time limits.
+#
 # Usage: actions.sh <copy|save|ocr|edit> <file>
 
 set -uo pipefail
 
-action="${1:-}"
-file="${2:-}"
-
-[[ -n $file && -f $file ]] || exit 1
-
 here=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd) || exit 1
+source "$here/lib/guard.sh" || exit 1
+
+action="${1:-}"
+file=$(kirinuki_safe_image "${2:-}") || exit 1
 
 notify() { omarchy-notification-send "$@" >/dev/null 2>&1 || true; }
 
-# Same resolution order as omarchy-capture-screenshot, so Save lands where the
-# stock flow would have put it.
-screenshot_dir() {
-  [[ -f ~/.config/user-dirs.dirs ]] && source ~/.config/user-dirs.dirs
-  printf '%s' "${OMARCHY_SCREENSHOT_DIR:-${XDG_PICTURES_DIR:-$HOME/Pictures}}"
-}
-
-# wl-copy advertises only the type it is given and most apps ask for
-# image/png when pasting, so JPEG captures are transcoded on the way to the
-# clipboard. See bin/capture for the same reasoning.
-copy_image() {
-  case "${file,,}" in
-    *.png) wl-copy --type image/png <"$file" ;;
-    *) magick "$file" png:- | wl-copy --type image/png ;;
-  esac
-}
-
 case "$action" in
   copy)
-    copy_image
+    kirinuki_copy_png "$file" || { notify "Could not copy screenshot"; exit 1; }
     notify "Screenshot copied to clipboard" -t 2000
     ;;
 
@@ -43,7 +30,7 @@ case "$action" in
     # Captures stage in a scratch dir (see bin/capture); Save is
     # what promotes one into the screenshots folder. No file dialog: the
     # destination is the configured folder, same as the stock capture flow.
-    dir=$(screenshot_dir)
+    dir=$(kirinuki_screenshot_dir)
     mkdir -p "$dir" || { notify "Could not save screenshot" "$dir"; exit 1; }
     dest="$dir/$(basename "$file")"
 
@@ -60,9 +47,11 @@ case "$action" in
       notify -g 󰴑 "OCR needs tesseract" "Install tesseract and a language pack"
       exit 1
     fi
-    text=$(tesseract "$file" stdout --oem 1 --psm 6 \
-      -l "${OMARCHY_OCR_LANGS:-eng}" --dpi 300 \
-      -c preserve_interword_spaces=1 2>/dev/null)
+    # Bounded like every other decode here: a wall-clock ceiling on the run,
+    # and a ceiling on how much text may reach the clipboard.
+    text=$(timeout "$KIRINUKI_TIMEOUT" tesseract "$file" stdout --oem 1 --psm 6 \
+      -l "$(kirinuki_ocr_langs)" --dpi 300 \
+      -c preserve_interword_spaces=1 2>/dev/null | head -c "$KIRINUKI_MAX_TEXT_BYTES")
     if [[ -z ${text//[[:space:]]/} ]]; then
       notify -g 󰴑 "No text found in screenshot"
       exit 1

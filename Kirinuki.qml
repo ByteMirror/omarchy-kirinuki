@@ -57,6 +57,66 @@ Item {
     decodeURIComponent(String(Qt.resolvedUrl(".")).replace(/^file:\/\//, "").replace(/\/$/, ""))
   readonly property string helper: root.pluginDir + "/actions.sh"
 
+  // ---- path guard ---------------------------------------------------
+  //
+  // The mirror of lib/guard.sh on this side of the IPC. Every path this panel
+  // is handed -- by bin/summon, by a keybind, by anything else that can reach
+  // the shell's IPC socket -- is a path it is about to decode as an image and
+  // then hand to actions.sh, so it is only accepted if it names a capture in
+  // the staging dir or the screenshots folder. The helpers re-check with the
+  // stronger test (canonical, ours, not a symlink, decodable within limits);
+  // this stops an arbitrary file being read into the card in the first place.
+  readonly property string homeDir: Quickshell.env("HOME") || ""
+
+  // XDG_PICTURES_DIR usually lives in user-dirs.dirs rather than in the
+  // shell's environment, and a localised pictures folder is where a saved
+  // capture legitimately sits -- so the file is read the same way the helpers
+  // read it, instead of guessing $HOME/Pictures for everyone.
+  property string picturesDir: ""
+
+  FileView {
+    path: root.homeDir + "/.config/user-dirs.dirs"
+    watchChanges: true
+    printErrors: false
+    onFileChanged: reload()
+    onLoadFailed: root.picturesDir = ""
+    onLoaded: {
+      var m = /^\s*XDG_PICTURES_DIR\s*=\s*"?(.*?)"?\s*$/m.exec(text() || "")
+      var v = m ? m[1] : ""
+      root.picturesDir = v.indexOf("$HOME/") === 0
+        ? root.homeDir + v.slice(5) : v
+    }
+  }
+
+  readonly property var pathRoots: {
+    var runtime = Quickshell.env("XDG_RUNTIME_DIR") || "/tmp"
+    var staging = Quickshell.env("KIRINUKI_STAGING_DIR") || (runtime + "/kirinuki")
+    var shots = Quickshell.env("OMARCHY_SCREENSHOT_DIR")
+      || Quickshell.env("XDG_PICTURES_DIR")
+      || root.picturesDir
+      || (root.homeDir + "/Pictures")
+    var roots = []
+    var candidates = [staging, shots]
+    for (var i = 0; i < candidates.length; i++) {
+      var r = String(candidates[i] || "").replace(/\/+$/, "")
+      if (r.charAt(0) === "/" && r.indexOf("..") < 0) roots.push(r)
+    }
+    return roots
+  }
+
+  // The accepted path, or "" for anything that is not one of ours.
+  function acceptPath(candidate) {
+    var p = String(candidate || "")
+    if (p.charAt(0) !== "/") return ""
+    if (p.indexOf("\u0000") >= 0 || p.indexOf("\n") >= 0) return ""
+    // No traversal: a root prefix means nothing if the tail can climb out of it.
+    if (p.indexOf("/../") >= 0 || p.slice(-3) === "/..") return ""
+    if (!/\.(png|jpe?g)$/i.test(p)) return ""
+    for (var i = 0; i < root.pathRoots.length; i++)
+      if (p.indexOf(root.pathRoots[i] + "/") === 0) return p
+    return ""
+  }
+
   property string path: ""
   property bool opened: false
   property real previewX: 0
@@ -111,9 +171,6 @@ Item {
 
   property var pins: []
   property int pinSerial: 0
-  // Diagnostic: incremented by every wheel event that reaches a pin, from
-  // either delivery path. Read it with `omarchy-shell kirinuki probe`.
-  property int wheelSeen: 0
   // Serial of the pin under the pointer, 0 for none. Pins never take the
   // keyboard, so a keybind has to ask which one is hovered.
   property int hoveredPin: 0
@@ -140,9 +197,10 @@ Item {
   function open(payloadJson) {
     var p = {}
     try { p = JSON.parse(payloadJson || "{}") || {} } catch (e) { p = {} }
-    if (!p.path) return
+    var accepted = root.acceptPath(p.path)
+    if (accepted === "") return false
 
-    root.path = String(p.path)
+    root.path = accepted
     root.monitorName = String(p.monitor || "")
     root.monitorWidth = Number(p.monitorWidth || 0)
     root.monitorHeight = Number(p.monitorHeight || 0)
@@ -158,6 +216,7 @@ Item {
     root.place()
     root.restartDismiss()
     Qt.callLater(root.clampPreview)
+    return true
   }
 
   function close() {
@@ -226,17 +285,18 @@ Item {
 
   IpcHandler {
     target: "kirinuki"
-    function show(payloadJson: string): string { root.open(payloadJson); return "ok" }
+    function show(payloadJson: string): string { return root.open(payloadJson) ? "ok" : "rejected" }
     function close(): string { root.close(); return "ok" }
     // Pin without going through the card, for keybinds and for testing.
     function pin(payloadJson: string): string {
       var p = {}
       try { p = JSON.parse(payloadJson || "{}") || {} } catch (e) { return "bad payload" }
-      if (!p.path) return "no path"
+      var accepted = root.acceptPath(p.path)
+      if (accepted === "") return "rejected"
       var next = root.pins.slice()
       next.push({
         "serial": ++root.pinSerial,
-        "path": String(p.path),
+        "path": accepted,
         "x": Number(p.x || 80), "y": Number(p.y || 80),
         "monitor": String(p.monitor || root.monitorName)
       })
@@ -265,26 +325,6 @@ Item {
     }
     function state(): string { return root.opened ? "open" : "closed" }
     function ping(): string { return "ok" }
-    // Layer-shell windows fail silently when geometry or screen lookup goes
-    // wrong -- this reports what the window actually resolved to.
-    function probe(): string {
-      var names = []
-      for (var i = 0; i < Quickshell.screens.length; i++) names.push(Quickshell.screens[i].name)
-      return JSON.stringify({
-        opened: root.opened, path: root.path, imageSource: root.imageSource,
-        screens: names, wantScreen: root.monitorName,
-        matched: previewWindow.screen ? previewWindow.screen.name : null,
-        visible: previewWindow.visible,
-        surfaceW: previewWindow.width, surfaceH: previewWindow.height,
-        cardW: card.width, cardH: card.height,
-        cardRadius: card.radius, shotRadius: root.shotRadius,
-        pluginId: root.manifest ? root.manifest.id : null,
-        pluginDir: root.pluginDir, dismissAfter: root.dismissAfter,
-        x: card.x, y: card.y, pins: root.pins.length,
-        cornerRadius: Style.cornerRadius, wheelSeen: root.wheelSeen,
-        hovered: cardHover.hovered, hasFocus: card.activeFocus
-      })
-    }
   }
 
   Timer {
@@ -550,6 +590,10 @@ Item {
           // Screenshots arrive at monitor resolution and land in a 340px
           // frame; without mipmaps that downscale crawls with aliasing.
           mipmap: true
+          // A ceiling on the decode, not a display size: whatever the file's
+          // real dimensions are, no more than this reaches memory. Twice the
+          // card leaves the downscale enough pixels to stay sharp.
+          sourceSize.width: root.cardWidth * 2
           source: root.imageSource
           // The file loads a frame or two after the card is up, so fade it
           // in rather than letting it snap into the empty frame.
@@ -731,7 +775,6 @@ Item {
       // wheels and touchpads -- which emit many small deltas -- from zooming
       // in huge jumps.
       function applyWheel(deltaY) {
-        root.wheelSeen++
         var notches = deltaY / 120
         if (notches === 0) return
         pinWindow.applyZoom(Math.pow(1.1, Math.max(-4, Math.min(4, notches))))
@@ -782,6 +825,9 @@ Item {
             anchors.fill: parent
             fillMode: Image.PreserveAspectFit
             asynchronous: true
+            // Same decode ceiling as the card, at the widest a pin can be
+            // zoomed to, so a pin stays sharp without ever decoding more.
+            sourceSize.width: root.pinMaxWidth * 4
             source: "file://" + modelData.path
           }
         }

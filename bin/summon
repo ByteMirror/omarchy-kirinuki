@@ -14,14 +14,18 @@
 # Exits non-zero when the shell is not running or the plugin is disabled, so
 # callers can fall back to a notification.
 #
-# Usage: summon <file>
+# Usage: summon <file>   (file must pass lib/guard.sh)
 
 set -uo pipefail
 
-file="${1:-}"
-[[ -n $file && -f $file ]] || exit 1
-
 plugin_dir=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")/.." && pwd) || exit 1
+source "$plugin_dir/lib/guard.sh" || exit 1
+
+# The panel decodes and then acts on whatever it is handed, so it is only ever
+# handed a capture that has passed the guard -- canonical, ours, staged or
+# saved, and within the decode limits.
+file=$(kirinuki_safe_image "${1:-}") || exit 1
+
 plugin_id=$(jq -r '.id // empty' "$plugin_dir/manifest.json" 2>/dev/null) || exit 1
 [[ -n $plugin_id ]] || exit 1
 

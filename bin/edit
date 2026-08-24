@@ -25,19 +25,28 @@ QUALITY="${KIRINUKI_JPEG_QUALITY:-92}"
 EDITOR_CMD="${OMARCHY_SCREENSHOT_EDITOR:-tensaku-edit}"
 
 here=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd) || exit 1
+source "$here/../lib/guard.sh" || exit 1
 
 # Tensaku pipes the PNG it copies to this command on stdin. The explicit
 # --type matters: wl-copy advertises only the type it is given, most apps ask
 # for image/png when pasting, and Omarchy's clipboard history watches
 # `text` and `image/png` alone.
 if [[ ${1:-} == --copy-helper ]]; then
-  wl-copy --type image/png
+  # Staged through a private scratch file rather than straight into wl-copy, so
+  # what reaches the clipboard is bounded by the same ceiling as everything
+  # else here instead of by whatever the editor decides to write.
+  clipdir=$(mktemp -d) || exit 1
+  trap 'rm -rf "$clipdir"' EXIT
+  head -c "$((KIRINUKI_MAX_BYTES + 1))" >"$clipdir/clip.png"
+  kirinuki_output_ok "$clipdir/clip.png" || exit 1
+  wl-copy --type image/png <"$clipdir/clip.png" || exit 1
   omarchy-notification-send "Screenshot copied to clipboard" -t 2000 >/dev/null 2>&1 || true
   exit 0
 fi
 
-file="${1:-}"
-[[ -n $file && -f $file ]] || exit 1
+# Opening an editor on an arbitrary path is exactly what the guard is for:
+# only a staged or saved capture of ours, within the decode limits, gets one.
+file=$(kirinuki_safe_image "${1:-}") || exit 1
 
 # Anything that is not a JPEG needs no round-trip: the editor writes the file
 # in place, and the panel comes back once it exits.
@@ -65,7 +74,12 @@ self=$(readlink -f -- "$0")
 # annotations does not come out black. A half-written PNG just fails the
 # conversion and gets retried on the next poll.
 fold_back() {
-  magick "$png" -background white -flatten -quality "$QUALITY" "$file" 2>/dev/null || return 1
+  # The scratch PNG is Tensaku's output, not a capture, so it is checked on its
+  # own terms: inside this run's private mktemp dir, within the size ceiling,
+  # and converted under the same bounded ImageMagick limits as everything else.
+  kirinuki_output_ok "$png" || return 1
+  kirinuki_magick "png:$png" -background white -flatten -quality "$QUALITY" \
+    "$(kirinuki_spec "$file")" 2>/dev/null || return 1
   # "Saved" would be a lie: the capture is still staged, and only Save in the
   # preview promotes it into the screenshots folder.
   omarchy-notification-send "Edit applied" "$(basename "$file")" -t 2000 \
