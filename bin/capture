@@ -1,0 +1,99 @@
+#!/bin/bash
+
+# Take a screenshot with Omarchy's capture flow, hold it in a scratch dir, and
+# offer it in the preview panel.
+#
+# Nothing lands in the screenshots folder on its own: the capture stages in
+# $XDG_RUNTIME_DIR and only reaches the screenshots folder when Save is
+# pressed in the preview (see the plugin's actions.sh). A shot the user
+# ignores simply ages out of the scratch dir.
+#
+# omarchy-capture-screenshot always writes PNG into its output directory, so
+# it is wrapped rather than edited: capture with `save` (skipping the editor
+# and notification) into a redirected output dir, then hand the file to the
+# panel.
+#
+# Usage: capture [smart|region|windows|fullscreen]
+#
+# Environment:
+#   SCREENSHOT_PREVIEW_JPEG=1         transcode captures to JPEG (needs magick)
+#   SCREENSHOT_PREVIEW_JPEG_QUALITY   JPEG quality, default 92
+#   SCREENSHOT_PREVIEW_STAGING_DIR    where captures wait, default
+#                                     $XDG_RUNTIME_DIR/omarchy-screenshot-preview
+#   SCREENSHOT_PREVIEW_KEEP_MINUTES   age at which an unsaved capture is
+#                                     dropped, default 1440
+#
+# Omarchy's own OMARCHY_SCREENSHOT_DIR and OMARCHY_SCREENSHOT_EDITOR are
+# honoured as-is; this plugin does not shadow them.
+
+set -uo pipefail
+
+MODE="${1:-smart}"
+QUALITY="${SCREENSHOT_PREVIEW_JPEG_QUALITY:-92}"
+KEEP_MINUTES="${SCREENSHOT_PREVIEW_KEEP_MINUTES:-1440}"
+STAGING="${SCREENSHOT_PREVIEW_STAGING_DIR:-${XDG_RUNTIME_DIR:-/tmp}/omarchy-screenshot-preview}"
+
+here=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd) || exit 1
+
+mkdir -p "$STAGING" || exit 1
+
+# Unsaved captures are disposable; drop yesterday's so the scratch dir cannot
+# grow without bound. A pinned shot older than this loses its image, but pins
+# do not survive a shell restart anyway.
+find "$STAGING" -maxdepth 1 -type f -mmin "+$KEEP_MINUTES" -delete 2>/dev/null
+
+# Where a Save would put it, used only by the no-panel fallback below.
+screenshot_dir() {
+  [[ -f ~/.config/user-dirs.dirs ]] && source ~/.config/user-dirs.dirs
+  printf '%s' "${OMARCHY_SCREENSHOT_DIR:-${XDG_PICTURES_DIR:-$HOME/Pictures}}"
+}
+
+# `save` prints the saved path; take the last line in case anything else
+# (e.g. the "created screenshot directory" notice) is written first.
+shot=$(OMARCHY_SCREENSHOT_DIR="$STAGING" omarchy-capture-screenshot "$MODE" save | tail -n 1) || exit 1
+
+# Empty output means the selection was cancelled, or a running slurp was
+# dismissed -- both are a normal no-op, not a failure.
+[[ -n $shot && -f $shot ]] || exit 0
+
+# Opt-in JPEG. Off by default: it costs an ImageMagick dependency and changes
+# the format of every screenshot, which is a decision for the user rather than
+# for the preview panel. JPEG has no alpha channel, so the image is flattened
+# onto white -- otherwise transparency comes out black. Keeping the PNG on a
+# failed conversion beats losing the capture, and every step downstream
+# handles either format.
+if [[ ${SCREENSHOT_PREVIEW_JPEG:-0} == 1 ]] && command -v magick >/dev/null 2>&1; then
+  jpg="${shot%.png}.jpg"
+  if magick "$shot" -background white -flatten -quality "$QUALITY" "$jpg" 2>/dev/null && [[ -s $jpg ]]; then
+    rm -f "$shot"
+    shot="$jpg"
+  else
+    rm -f "$jpg"
+  fi
+fi
+
+# The panel is where Copy / Save / Edit / OCR / Pin live. Without it the
+# capture would sit in a scratch dir the user never sees, so fall back to the
+# stock behaviour: keep the file and say where it went.
+if ! "$here/summon" "$shot"; then
+  dir=$(screenshot_dir)
+  mkdir -p "$dir"
+  dest="$dir/$(basename "$shot")"
+  mv -f "$shot" "$dest" 2>/dev/null || dest="$shot"
+
+  # Clipboard gets PNG whatever the file is: wl-copy advertises only the type
+  # it is given and most apps ask for image/png when pasting.
+  case "${dest,,}" in
+    *.png) wl-copy --type image/png <"$dest" >/dev/null 2>&1 ;;
+    *) magick "$dest" png:- 2>/dev/null | wl-copy --type image/png >/dev/null 2>&1 ;;
+  esac
+
+  omarchy-notification-send "Screenshot saved to clipboard and file" "$(basename "$dest")" \
+    --image "$dest" \
+    --exec "$(printf '%q %q' "$here/edit" "$dest")" >/dev/null 2>&1 || true
+
+  shot="$dest"
+fi
+
+# Printed last so it names where the capture actually is, staged or saved.
+echo "$shot"

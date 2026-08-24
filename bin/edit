@@ -1,0 +1,110 @@
+#!/bin/bash
+
+# Annotate a staged capture, then bring the preview panel back.
+#
+# An edited capture is still only staged, so the panel has to return: without
+# it there is no way left to save, copy, or pin what was just annotated.
+#
+# PNG goes straight to Omarchy's screenshot editor, which writes back in
+# place. JPEG cannot: Tensaku reads JPEG fine but can only *write* PNG --
+# handing it a .jpg as --output-filename fails with "The only supported format
+# is png". So a JPEG is edited through a scratch PNG that this wrapper folds
+# back into the original, keeping the staged capture in one format and one
+# place. The fold-back runs on every save rather than only at exit, so the
+# file always matches what was last saved, and Tensaku's own notifications are
+# suppressed because they report the scratch path in /tmp, which looks like
+# the screenshot went missing.
+#
+# Usage: edit <file>
+#        edit --copy-helper   (internal: Tensaku's --copy-command, so the
+#        clipboard gets an explicit image/png offer and copying still notifies)
+
+set -uo pipefail
+
+QUALITY="${SCREENSHOT_PREVIEW_JPEG_QUALITY:-92}"
+EDITOR_CMD="${OMARCHY_SCREENSHOT_EDITOR:-tensaku-edit}"
+
+here=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd) || exit 1
+
+# Tensaku pipes the PNG it copies to this command on stdin. The explicit
+# --type matters: wl-copy advertises only the type it is given, most apps ask
+# for image/png when pasting, and Omarchy's clipboard history watches
+# `text` and `image/png` alone.
+if [[ ${1:-} == --copy-helper ]]; then
+  wl-copy --type image/png
+  omarchy-notification-send "Screenshot copied to clipboard" -t 2000 >/dev/null 2>&1 || true
+  exit 0
+fi
+
+file="${1:-}"
+[[ -n $file && -f $file ]] || exit 1
+
+# Anything that is not a JPEG needs no round-trip: the editor writes the file
+# in place, and the panel comes back once it exits.
+case "${file,,}" in
+*.jpg | *.jpeg) ;;
+*)
+  "$EDITOR_CMD" "$file"
+  "$here/summon" "$file"
+  exit 0
+  ;;
+esac
+
+command -v magick >/dev/null 2>&1 || {
+  omarchy-notification-send "Cannot edit JPEG capture" \
+    "ImageMagick (magick) is not installed" >/dev/null 2>&1 || true
+  exit 1
+}
+
+tmpdir=$(mktemp -d) || exit 1
+trap 'rm -rf "$tmpdir"' EXIT
+png="$tmpdir/$(basename "${file%.*}").png"
+self=$(readlink -f -- "$0")
+
+# JPEG has no alpha channel; flatten onto white so any transparency in the
+# annotations does not come out black. A half-written PNG just fails the
+# conversion and gets retried on the next poll.
+fold_back() {
+  magick "$png" -background white -flatten -quality "$QUALITY" "$file" 2>/dev/null || return 1
+  # "Saved" would be a lie: the capture is still staged, and only Save in the
+  # preview promotes it into the screenshots folder.
+  omarchy-notification-send "Edit applied" "$(basename "$file")" -t 2000 \
+    --image "$file" >/dev/null 2>&1 || true
+}
+
+tensaku \
+  --filename "$file" \
+  --output-filename "$png" \
+  --actions-on-enter save-to-clipboard \
+  --save-after-copy \
+  --copy-command "$self --copy-helper" \
+  --disable-notifications &
+tensaku_pid=$!
+
+# %y carries nanoseconds, so two saves in the same second are still distinct.
+stamp=""
+current_stamp() { stat -c '%y %s' "$png" 2>/dev/null; }
+
+while kill -0 "$tensaku_pid" 2>/dev/null; do
+  if [[ -s $png ]]; then
+    cur=$(current_stamp)
+    if [[ -n $cur && $cur != "$stamp" ]]; then
+      fold_back && stamp=$cur
+    fi
+  fi
+  sleep 0.4
+done
+
+wait "$tensaku_pid"
+
+# A save landing in the same instant Tensaku exits would miss the loop.
+if [[ -s $png ]]; then
+  cur=$(current_stamp)
+  if [[ -n $cur && $cur != "$stamp" ]]; then
+    fold_back && stamp=$cur
+  fi
+fi
+
+[[ -n $stamp ]] && "$here/summon" "$file"
+
+exit 0

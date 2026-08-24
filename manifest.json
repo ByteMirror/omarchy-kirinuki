@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.bytemirror.screenshot-preview",
+  "name": "Screenshot Preview",
+  "version": "0.1.0",
+  "author": "ByteMirror",
+  "license": "MIT",
+  "description": "Shottr-style capture preview at the cursor: edit, copy, save, OCR, and pin to screen",
+  "kinds": [
+    "panel"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "panel": "ScreenshotPreview.qml"
+  }
+}

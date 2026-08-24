@@ -1,0 +1,47 @@
+#!/bin/bash
+
+# Show the screenshot preview panel next to the pointer for <file>.
+#
+# Coordinates from `hyprctl cursorpos` are logical and monitor-independent, so
+# they are rebased onto the monitor the pointer sits on -- layer-shell
+# geometry is relative to that monitor's own origin. `hyprctl monitors`
+# reports width/height in physical pixels, hence the divide by scale.
+#
+# The plugin id is read from the manifest next to this script rather than
+# hardcoded, so a fork, a rename, or a hand-drop into a differently named
+# folder all keep working.
+#
+# Exits non-zero when the shell is not running or the plugin is disabled, so
+# callers can fall back to a notification.
+#
+# Usage: summon <file>
+
+set -uo pipefail
+
+file="${1:-}"
+[[ -n $file && -f $file ]] || exit 1
+
+plugin_dir=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")/.." && pwd) || exit 1
+plugin_id=$(jq -r '.id // empty' "$plugin_dir/manifest.json" 2>/dev/null) || exit 1
+[[ -n $plugin_id ]] || exit 1
+
+cursor=$(hyprctl cursorpos 2>/dev/null) || exit 1
+cx=${cursor%%,*}
+cy=${cursor##*, }
+[[ $cx =~ ^-?[0-9]+$ && $cy =~ ^-?[0-9]+$ ]] || exit 1
+
+payload=$(hyprctl monitors -j 2>/dev/null | jq -c \
+  --arg path "$file" --argjson cx "$cx" --argjson cy "$cy" '
+    map(select(.disabled != true)) as $ms
+    | ( ($ms | map(select(
+          $cx >= .x and $cx < (.x + (.width / .scale))
+          and $cy >= .y and $cy < (.y + (.height / .scale)))) | first)
+        // ($ms | map(select(.focused)) | first) // $ms[0] ) as $m
+    | { path: $path,
+        x: ($cx - $m.x), y: ($cy - $m.y),
+        monitor: $m.name,
+        monitorWidth: ($m.width / $m.scale),
+        monitorHeight: ($m.height / $m.scale) }') || exit 1
+[[ -n $payload && $payload != null ]] || exit 1
+
+[[ $(omarchy-shell shell summon "$plugin_id" "$payload" 2>/dev/null) == ok ]]
