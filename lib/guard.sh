@@ -10,6 +10,16 @@
 # extension, and inside the staging dir or the screenshots folder. Anything
 # else is refused before a single byte is read.
 #
+# And a path that passes is still only a name. The entry it names can be
+# swapped -- for a symlink, for another file -- in the instant between the
+# check and the open, so nothing with a side effect ever acts on a name. It
+# asks kirinuki_open_image for a file descriptor, whose open object is what
+# gets verified, and reads it as /dev/fd/N, which on Linux resolves to that
+# inode and not to whatever the name has come to mean since. Writes go the
+# same way: a save lands beside its destination and is renamed into place, so
+# a symlink planted at the destination is replaced rather than written
+# through.
+#
 # Decoding is bounded too. ImageMagick and Tesseract will happily spend all the
 # memory and time in the world on a crafted file, and they run inside the
 # desktop session, so every invocation carries explicit size, dimension,
@@ -74,14 +84,9 @@ kirinuki_format() {
   esac
 }
 
-# `format:path`, so ImageMagick never sniffs content to decide what a file is.
-kirinuki_spec() {
-  local fmt
-  fmt=$(kirinuki_format "$1") || return 1
-  printf '%s:%s' "$fmt" "$1"
-}
-
-# The boundary. Prints the canonical path on success, nothing on refusal.
+# The name-level half of the boundary. Prints the canonical path on success,
+# nothing on refusal. Enough to decide what a name *may* be; only
+# kirinuki_open_image below decides what it *is*.
 #
 # Symlinks are rejected at the named component rather than followed, so a link
 # planted in the staging dir cannot borrow the trust of the directory it sits
@@ -109,30 +114,70 @@ kirinuki_safe_path() {
   return 1
 }
 
-# kirinuki_safe_path plus what it costs to decode: the file has to fit the size
-# ceiling, and its header has to describe an image within the pixel and
-# dimension ceilings whose real format matches its extension.
-kirinuki_safe_image() {
-  local canon size out fmt m w h
-  canon=$(kirinuki_safe_path "${1:-}") || return 1
+# The object-level half of the boundary. Opens the capture and verifies what
+# was actually opened, then hands the descriptor back in the named variable.
+#
+#   kirinuki_open_image fd /path/to/capture.png || exit 1
+#   ... "/dev/fd/$fd" ...
+#   kirinuki_close fd
+#
+# fstat on the descriptor says it is a regular file, ours, and within the size
+# ceiling; lstat on the name says the name is still a plain entry -- not a
+# symlink -- for that same inode, so the object held is the one that was vetted
+# at that location and not something reached through a link planted since.
+# Only then is the header read, from the descriptor, and only the first frame:
+# a multi-frame file costs nothing extra to refuse here but a lot to decode
+# later. Its real format has to match the extension, and its pixel count and
+# sides have to fit the ceilings.
+#
+# Consumers must read /dev/fd/N rather than the descriptor itself: each open of
+# that path is a fresh view of the same inode from offset zero, so several
+# readers in a row all see the whole file.
+kirinuki_open_image() {
+  local -n kirinuki_out_fd=$1
+  local canon opened=-1 type uid size held named fmt out m w h
+  canon=$(kirinuki_safe_path "${2:-}") || return 1
+  { exec {opened}<"$canon"; } 2>/dev/null || return 1
 
-  size=$(stat -c '%s' -- "$canon" 2>/dev/null) || return 1
-  (( size > 0 && size <= KIRINUKI_MAX_BYTES )) || return 1
+  IFS='|' read -r type uid size held < <(stat -L -c '%F|%u|%s|%d:%i' -- "/dev/fd/$opened" 2>/dev/null)
+  [[ $type == 'regular file' ]] || { exec {opened}<&-; return 1; }
+  [[ $uid == "$(id -u)" ]] || { exec {opened}<&-; return 1; }
+  [[ $size =~ ^[0-9]+$ ]] && (( size > 0 && size <= KIRINUKI_MAX_BYTES )) || { exec {opened}<&-; return 1; }
 
-  # Header-only read, and only the first frame: a multi-frame file costs
-  # nothing extra to refuse here but a lot to decode later.
+  named=$(stat -c '%F|%d:%i' -- "$canon" 2>/dev/null)
+  [[ $named == "regular file|$held" ]] || { exec {opened}<&-; return 1; }
+
   if command -v magick >/dev/null 2>&1; then
-    fmt=$(kirinuki_format "$canon") || return 1
+    fmt=$(kirinuki_format "$canon") || { exec {opened}<&-; return 1; }
     out=$(timeout "$KIRINUKI_TIMEOUT" magick identify -quiet "${kirinuki_im_limits[@]}" \
-      -format '%m %w %h' "${fmt}:${canon}[0]" 2>/dev/null) || return 1
+      -format '%m %w %h' "${fmt}:/dev/fd/${opened}[0]" 2>/dev/null) || { exec {opened}<&-; return 1; }
     read -r m w h <<<"$out"
-    case "$fmt:$m" in png:PNG | jpg:JPEG | jpg:JPG) ;; *) return 1 ;; esac
-    [[ $w =~ ^[0-9]+$ && $h =~ ^[0-9]+$ ]] || return 1
-    (( w > 0 && h > 0 )) || return 1
-    (( w <= KIRINUKI_MAX_DIMENSION && h <= KIRINUKI_MAX_DIMENSION )) || return 1
-    (( w * h <= KIRINUKI_MAX_PIXELS )) || return 1
+    case "$fmt:$m" in png:PNG | jpg:JPEG | jpg:JPG) ;; *) exec {opened}<&-; return 1 ;; esac
+    [[ $w =~ ^[0-9]+$ && $h =~ ^[0-9]+$ ]] || { exec {opened}<&-; return 1; }
+    (( w > 0 && h > 0 )) || { exec {opened}<&-; return 1; }
+    (( w <= KIRINUKI_MAX_DIMENSION && h <= KIRINUKI_MAX_DIMENSION )) || { exec {opened}<&-; return 1; }
+    (( w * h <= KIRINUKI_MAX_PIXELS )) || { exec {opened}<&-; return 1; }
   fi
 
+  kirinuki_out_fd=$opened
+}
+
+kirinuki_close() {
+  local -n kirinuki_out_fd=$1
+  [[ $kirinuki_out_fd =~ ^[0-9]+$ ]] && exec {kirinuki_out_fd}<&-
+  kirinuki_out_fd=-1
+}
+
+# Both halves, for a caller that only needs to know whether a name is a
+# capture right now -- bin/summon, which hands the panel a name to display and
+# cannot hand it a descriptor. Prints the canonical path. The panel only ever
+# shows the image; every side effect re-opens and re-verifies at the moment of
+# use.
+kirinuki_safe_image() {
+  local canon fd=-1
+  canon=$(kirinuki_safe_path "${1:-}") || return 1
+  kirinuki_open_image fd "$canon" || return 1
+  kirinuki_close fd
   printf '%s' "$canon"
 }
 
@@ -167,20 +212,52 @@ kirinuki_ocr_langs() {
 # so the result can be size-checked before it is offered -- a small input can
 # still decompress into an enormous one, and a truncated pipe would put a
 # corrupt image on the clipboard instead of failing.
+#
+#   kirinuki_copy_png <fd> <png|jpg>
 kirinuki_copy_png() {
-  local file="${1:-}" tmpdir png rc=1
-  case "$file" in
-    *.png | *.PNG)
-      wl-copy --type image/png <"$file" && rc=0
-      return $rc
-      ;;
-  esac
+  local fd="${1:-}" fmt="${2:-}" tmpdir png rc=1
+  [[ $fd =~ ^[0-9]+$ ]] || return 1
+  if [[ $fmt == png ]]; then
+    wl-copy --type image/png <"/dev/fd/$fd" && rc=0
+    return $rc
+  fi
+  [[ $fmt == jpg ]] || return 1
   tmpdir=$(mktemp -d) || return 1
   png="$tmpdir/clip.png"
-  if kirinuki_magick "$(kirinuki_spec "$file")" -background white -flatten "png:$png" 2>/dev/null \
+  if kirinuki_magick "jpg:/dev/fd/$fd" -background white -flatten "png:$png" 2>/dev/null \
     && kirinuki_output_ok "$png"; then
     wl-copy --type image/png <"$png" && rc=0
   fi
   rm -rf "$tmpdir"
   return $rc
+}
+
+# Put the capture behind <fd> into <dir> as <name>. Prints the destination.
+#
+# The bytes come from the descriptor, so they are the verified capture and not
+# whatever the source name means by the time Save is pressed. They land in a
+# private temp file beside the destination and are renamed over it: rename(2)
+# swaps the directory entry itself, so a symlink planted at that predictable
+# name is replaced rather than written through, and -T refuses to descend into
+# a directory of that name. Overwriting is deliberate -- saving the same
+# capture twice, typically after annotating it, should update that file.
+#
+#   kirinuki_save_into <fd> <name> <dir>
+kirinuki_save_into() {
+  local fd="${1:-}" name="${2:-}" dir="${3:-}" tmp dest
+  [[ $fd =~ ^[0-9]+$ ]] || return 1
+  [[ -n $name && $name != */* && $name != .* ]] || return 1
+  [[ -n $dir && $dir == /* ]] || return 1
+  mkdir -p -- "$dir" 2>/dev/null
+  [[ -d $dir && $(stat -L -c '%u' -- "$dir" 2>/dev/null) == "$(id -u)" ]] || return 1
+  tmp=$(mktemp -- "$dir/.kirinuki.XXXXXXXX") || return 1
+  dest="$dir/$name"
+  if cat -- "/dev/fd/$fd" >"$tmp" && kirinuki_output_ok "$tmp" \
+    && chmod "$(printf '%o' $((0666 & ~0$(umask))))" -- "$tmp" \
+    && mv -fT -- "$tmp" "$dest"; then
+    printf '%s' "$dest"
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
 }

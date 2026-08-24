@@ -5,15 +5,21 @@
 # An edited capture is still only staged, so the panel has to return: without
 # it there is no way left to save, copy, or pin what was just annotated.
 #
-# PNG goes straight to Omarchy's screenshot editor, which writes back in
-# place. JPEG cannot: Tensaku reads JPEG fine but can only *write* PNG --
-# handing it a .jpg as --output-filename fails with "The only supported format
-# is png". So a JPEG is edited through a scratch PNG that this wrapper folds
-# back into the original, keeping the staged capture in one format and one
-# place. The fold-back runs on every save rather than only at exit, so the
-# file always matches what was last saved, and Tensaku's own notifications are
-# suppressed because they report the scratch path in /tmp, which looks like
-# the screenshot went missing.
+# The editor never sees the staged file. The capture is opened once through
+# lib/guard.sh and held for the whole session; the editor works on a private
+# scratch copy, and every save is folded back into the held inode by writing
+# through the descriptor. So what gets edited is what was verified, and what
+# gets overwritten is that same object -- not whatever the staged name has
+# been pointed at since.
+#
+# With Omarchy's own editor the fold-back runs on every save rather than only
+# at exit, so the file always matches what was last saved; Tensaku's own
+# notifications are suppressed because they would report the scratch path in
+# /tmp, which looks like the screenshot went missing. JPEG needs the
+# round-trip anyway: Tensaku reads JPEG fine but can only *write* PNG, so its
+# output is transcoded on the way back and the capture stays in one format.
+# A custom OMARCHY_SCREENSHOT_EDITOR is handed the scratch copy to edit in
+# place and folded back once it exits.
 #
 # Usage: edit <file>
 #        edit --copy-helper   (internal: Tensaku's --copy-command, so the
@@ -46,48 +52,74 @@ fi
 
 # Opening an editor on an arbitrary path is exactly what the guard is for:
 # only a staged or saved capture of ours, within the decode limits, gets one.
-file=$(kirinuki_safe_image "${1:-}") || exit 1
+file=$(kirinuki_safe_path "${1:-}") || exit 1
+fd=-1
+kirinuki_open_image fd "$file" || exit 1
+fmt=$(kirinuki_format "$file") || exit 1
 
-# Anything that is not a JPEG needs no round-trip: the editor writes the file
-# in place, and the panel comes back once it exits.
-case "${file,,}" in
-*.jpg | *.jpeg) ;;
-*)
-  "$EDITOR_CMD" "$file"
-  "$here/summon" "$file"
-  exit 0
-  ;;
-esac
-
-command -v magick >/dev/null 2>&1 || {
+if [[ $fmt == jpg ]] && ! command -v magick >/dev/null 2>&1; then
   omarchy-notification-send "Cannot edit JPEG capture" \
     "ImageMagick (magick) is not installed" >/dev/null 2>&1 || true
   exit 1
-}
+fi
 
 tmpdir=$(mktemp -d) || exit 1
 trap 'rm -rf "$tmpdir"' EXIT
-png="$tmpdir/$(basename "${file%.*}").png"
+base=$(basename "${file%.*}")
+src="$tmpdir/$base.png"   # what the editor is shown
+png="$tmpdir/$base.out.png" # what Tensaku writes
 self=$(readlink -f -- "$0")
 
-# JPEG has no alpha channel; flatten onto white so any transparency in the
-# annotations does not come out black. A half-written PNG just fails the
-# conversion and gets retried on the next poll.
+# The editor's copy, from the descriptor. A JPEG is flattened onto white on
+# the way in, so the editor works on the same pixels the fold-back produces.
+if [[ $fmt == png ]]; then
+  cat -- "/dev/fd/$fd" >"$src" || exit 1
+else
+  kirinuki_magick "jpg:/dev/fd/$fd" -background white -flatten "png:$src" 2>/dev/null || exit 1
+fi
+kirinuki_output_ok "$src" || exit 1
+
+# Fold <edited png> back into the held capture. The scratch PNG is the
+# editor's output, not a capture, so it is checked on its own terms: inside
+# this run's private mktemp dir, within the size ceiling, and converted under
+# the same bounded ImageMagick limits as everything else. JPEG has no alpha
+# channel; flatten onto white so transparency in the annotations does not
+# come out black. A half-written PNG just fails and gets retried on the next
+# poll. The write goes to /dev/fd/N, which truncates and rewrites the inode
+# that was verified at open -- the staged name is never touched again.
 fold_back() {
-  # The scratch PNG is Tensaku's output, not a capture, so it is checked on its
-  # own terms: inside this run's private mktemp dir, within the size ceiling,
-  # and converted under the same bounded ImageMagick limits as everything else.
-  kirinuki_output_ok "$png" || return 1
-  kirinuki_magick "png:$png" -background white -flatten -quality "$QUALITY" \
-    "$(kirinuki_spec "$file")" 2>/dev/null || return 1
+  local edited="$1" staged
+  kirinuki_output_ok "$edited" || return 1
+  if [[ $fmt == png ]]; then
+    cat -- "$edited" >"/dev/fd/$fd" || return 1
+  else
+    staged="$tmpdir/$base.fold.jpg"
+    kirinuki_magick "png:$edited" -background white -flatten -quality "$QUALITY" \
+      "jpg:$staged" 2>/dev/null && kirinuki_output_ok "$staged" || return 1
+    cat -- "$staged" >"/dev/fd/$fd" || return 1
+  fi
   # "Saved" would be a lie: the capture is still staged, and only Save in the
   # preview promotes it into the screenshots folder.
   omarchy-notification-send "Edit applied" "$(basename "$file")" -t 2000 \
-    --image "$file" >/dev/null 2>&1 || true
+    --image "$edited" >/dev/null 2>&1 || true
 }
 
+# %y carries nanoseconds, so two saves in the same second are still distinct.
+current_stamp() { stat -c '%y %s' "$1" 2>/dev/null; }
+
+# A custom editor edits the scratch copy in place; fold once it exits.
+if [[ $EDITOR_CMD != tensaku-edit ]]; then
+  before=$(current_stamp "$src")
+  "$EDITOR_CMD" "$src"
+  after=$(current_stamp "$src")
+  if [[ -n $after && $after != "$before" ]] && fold_back "$src"; then
+    "$here/summon" "$file"
+  fi
+  exit 0
+fi
+
 tensaku \
-  --filename "$file" \
+  --filename "$src" \
   --output-filename "$png" \
   --actions-on-enter save-to-clipboard \
   --save-after-copy \
@@ -95,15 +127,12 @@ tensaku \
   --disable-notifications &
 tensaku_pid=$!
 
-# %y carries nanoseconds, so two saves in the same second are still distinct.
 stamp=""
-current_stamp() { stat -c '%y %s' "$png" 2>/dev/null; }
-
 while kill -0 "$tensaku_pid" 2>/dev/null; do
   if [[ -s $png ]]; then
-    cur=$(current_stamp)
+    cur=$(current_stamp "$png")
     if [[ -n $cur && $cur != "$stamp" ]]; then
-      fold_back && stamp=$cur
+      fold_back "$png" && stamp=$cur
     fi
   fi
   sleep 0.4
@@ -113,9 +142,9 @@ wait "$tensaku_pid"
 
 # A save landing in the same instant Tensaku exits would miss the loop.
 if [[ -s $png ]]; then
-  cur=$(current_stamp)
+  cur=$(current_stamp "$png")
   if [[ -n $cur && $cur != "$stamp" ]]; then
-    fold_back && stamp=$cur
+    fold_back "$png" && stamp=$cur
   fi
 fi
 

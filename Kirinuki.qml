@@ -63,9 +63,13 @@ Item {
   // is handed -- by bin/summon, by a keybind, by anything else that can reach
   // the shell's IPC socket -- is a path it is about to decode as an image and
   // then hand to actions.sh, so it is only accepted if it names a capture in
-  // the staging dir or the screenshots folder. The helpers re-check with the
-  // stronger test (canonical, ours, not a symlink, decodable within limits);
-  // this stops an arbitrary file being read into the card in the first place.
+  // the staging dir or the screenshots folder. This stops an arbitrary file
+  // being read into the card in the first place; it is display-only. Every
+  // side effect goes through actions.sh, which opens the file itself and
+  // verifies the open object (regular, ours, still the plain entry at that
+  // name, decodable within limits) before reading it through /dev/fd -- so
+  // whatever the name is swapped for after this check is never what gets
+  // copied, saved, read or edited.
   readonly property string homeDir: Quickshell.env("HOME") || ""
 
   // XDG_PICTURES_DIR usually lives in user-dirs.dirs rather than in the

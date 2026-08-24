@@ -172,10 +172,23 @@ The panel only ever acts on a capture of yours. A path reaching it — over the
 shell's IPC, from a keybind, from anywhere else — is accepted only if it is an
 existing regular file you own, not a symlink, named `.png`/`.jpg`/`.jpeg`, and
 inside the staging dir or your screenshots folder; `lib/guard.sh` is the single
-place that decides. Decoding is bounded as well: the size, pixel, dimension,
-output-size and wall-clock ceilings in the table above apply to every image and
-OCR run, so a malformed or hostile file fails instead of taking the desktop
-shell down with it.
+place that decides.
+
+A path that passes is still only a name, so nothing with a side effect acts on
+one. Copy, Save, OCR and Edit each open the capture once, verify the *open
+file* — a regular file, yours, still the plain entry at that name, with a
+header that matches its extension — and then read it as `/dev/fd/N`, which
+resolves to that inode rather than to whatever the name means by then. Save
+writes from that descriptor to a temp file beside the destination and renames
+it into place, so a symlink planted at the predictable destination name is
+replaced, never written through. Edit hands the editor a private scratch copy
+and folds each save back into the held inode. The panel itself only displays
+the image; every side effect re-opens and re-verifies at the moment of use.
+
+Decoding is bounded as well: the size, pixel, dimension, output-size and
+wall-clock ceilings in the table above apply to every image and OCR run, so a
+malformed or hostile file fails instead of taking the desktop shell down with
+it.
 
 `omarchy-shell kirinuki state` answers `open` or `closed`, and
 `omarchy-shell kirinuki ping` answers `ok` — enough to tell a wedged panel
