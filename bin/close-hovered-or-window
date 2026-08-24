@@ -1,0 +1,31 @@
+#!/bin/bash
+
+# Close the pinned clipping under the pointer, or fall back to Hyprland's
+# normal close-window.
+#
+# Optional. Bind this instead of the stock close-window dispatcher if you want
+# one key to dismiss both:
+#
+#   o.bind("SUPER + W", "Close window or hovered pin",
+#     os.getenv("HOME") .. "/.config/omarchy/plugins/<plugin-id>/bin/close-hovered-or-window")
+#
+# A pin is a layer surface that never takes keyboard focus, and Hyprland runs
+# its keybinds before any client sees the key -- so a pin can never receive
+# the combination itself. The bind has to ask the shell whether one is
+# hovered, and the panel answers `none` when there is not, so the keystroke
+# falls through instead of being swallowed.
+#
+# The IPC timeout is deliberately tight: a dead or busy shell must not delay
+# closing a window.
+
+set -uo pipefail
+
+if [[ $(OMARCHY_SHELL_IPC_TIMEOUT=0.2s \
+  omarchy-shell kirinuki closeHovered 2>/dev/null) == closed ]]; then
+  exit 0
+fi
+
+# Hyprland's Lua dispatchers are the current form; fall back to the classic
+# name so this keeps working on an older Hyprland.
+hyprctl dispatch 'hl.dsp.window.close()' >/dev/null 2>&1 && exit 0
+hyprctl dispatch killactive >/dev/null 2>&1

@@ -54,6 +54,23 @@ o.bind("PRINT", "Screenshot", capture)
 `smart` (the default), `region`, `windows`, `fullscreen` — so
 `capture region` binds a region-only key.
 
+### Optional: one key to close a window *or* a hovered pin
+
+A pin is a layer surface and never takes keyboard focus, and Hyprland runs its
+own binds before any client sees the key, so a pin can never be closed by a
+keybind directly. `bin/close-hovered-or-window` asks the panel first and falls
+through to closing the window when no pin is under the pointer:
+
+```lua
+local kirinuki = os.getenv("HOME") .. "/.config/omarchy/plugins/io.github.bytemirror.kirinuki"
+
+hl.unbind("SUPER + W")
+o.bind("SUPER + W", "Close window or hovered pin", kirinuki .. "/bin/close-hovered-or-window")
+```
+
+Pins also always have a close button in their hover toolbar, so this is
+convenience, not a requirement.
+
 The plugin replaces nothing. `omarchy-capture-screenshot` and any key still
 bound to it keep working exactly as before; this is a second, parallel path.
 
