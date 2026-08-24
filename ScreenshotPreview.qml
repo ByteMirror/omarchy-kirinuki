@@ -278,6 +278,8 @@ Item {
         surfaceW: previewWindow.width, surfaceH: previewWindow.height,
         cardW: card.width, cardH: card.height,
         cardRadius: card.radius, shotRadius: root.shotRadius,
+        pluginId: root.manifest ? root.manifest.id : null,
+        pluginDir: root.pluginDir, dismissAfter: root.dismissAfter,
         x: card.x, y: card.y, pins: root.pins.length,
         cornerRadius: Style.cornerRadius, wheelSeen: root.wheelSeen,
         hovered: cardHover.hovered, hasFocus: card.activeFocus
