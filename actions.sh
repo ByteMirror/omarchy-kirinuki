@@ -25,7 +25,7 @@ screenshot_dir() {
 
 # wl-copy advertises only the type it is given and most apps ask for
 # image/png when pasting, so JPEG captures are transcoded on the way to the
-# clipboard. See omarchy-screenshot-jpeg for the same reasoning.
+# clipboard. See bin/capture for the same reasoning.
 copy_image() {
   case "${file,,}" in
     *.png) wl-copy --type image/png <"$file" ;;
@@ -40,7 +40,7 @@ case "$action" in
     ;;
 
   save)
-    # Captures stage in a scratch dir (see omarchy-screenshot-jpeg); Save is
+    # Captures stage in a scratch dir (see bin/capture); Save is
     # what promotes one into the screenshots folder. No file dialog: the
     # destination is the configured folder, same as the stock capture flow.
     dir=$(screenshot_dir)

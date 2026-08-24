@@ -1,16 +1,16 @@
 {
   "schemaVersion": 1,
-  "id": "io.github.bytemirror.screenshot-preview",
-  "name": "Screenshot Preview",
+  "id": "io.github.bytemirror.kirinuki",
+  "name": "Kirinuki",
   "version": "0.1.0",
   "author": "ByteMirror",
   "license": "MIT",
-  "description": "Shottr-style capture preview at the cursor: edit, copy, save, OCR, and pin to screen",
+  "description": "A capture preview card at the cursor: annotate, copy, save, OCR, or pin the shot to your screen",
   "kinds": [
     "panel"
   ],
   "keepLoaded": true,
   "entryPoints": {
-    "panel": "ScreenshotPreview.qml"
+    "panel": "Kirinuki.qml"
   }
 }

@@ -16,11 +16,11 @@
 # Usage: capture [smart|region|windows|fullscreen]
 #
 # Environment:
-#   SCREENSHOT_PREVIEW_JPEG=1         transcode captures to JPEG (needs magick)
-#   SCREENSHOT_PREVIEW_JPEG_QUALITY   JPEG quality, default 92
-#   SCREENSHOT_PREVIEW_STAGING_DIR    where captures wait, default
-#                                     $XDG_RUNTIME_DIR/omarchy-screenshot-preview
-#   SCREENSHOT_PREVIEW_KEEP_MINUTES   age at which an unsaved capture is
+#   KIRINUKI_JPEG=1         transcode captures to JPEG (needs magick)
+#   KIRINUKI_JPEG_QUALITY   JPEG quality, default 92
+#   KIRINUKI_STAGING_DIR    where captures wait, default
+#                                     $XDG_RUNTIME_DIR/kirinuki
+#   KIRINUKI_KEEP_MINUTES   age at which an unsaved capture is
 #                                     dropped, default 1440
 #
 # Omarchy's own OMARCHY_SCREENSHOT_DIR and OMARCHY_SCREENSHOT_EDITOR are
@@ -29,9 +29,9 @@
 set -uo pipefail
 
 MODE="${1:-smart}"
-QUALITY="${SCREENSHOT_PREVIEW_JPEG_QUALITY:-92}"
-KEEP_MINUTES="${SCREENSHOT_PREVIEW_KEEP_MINUTES:-1440}"
-STAGING="${SCREENSHOT_PREVIEW_STAGING_DIR:-${XDG_RUNTIME_DIR:-/tmp}/omarchy-screenshot-preview}"
+QUALITY="${KIRINUKI_JPEG_QUALITY:-92}"
+KEEP_MINUTES="${KIRINUKI_KEEP_MINUTES:-1440}"
+STAGING="${KIRINUKI_STAGING_DIR:-${XDG_RUNTIME_DIR:-/tmp}/kirinuki}"
 
 here=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd) || exit 1
 
@@ -62,7 +62,7 @@ shot=$(OMARCHY_SCREENSHOT_DIR="$STAGING" omarchy-capture-screenshot "$MODE" save
 # onto white -- otherwise transparency comes out black. Keeping the PNG on a
 # failed conversion beats losing the capture, and every step downstream
 # handles either format.
-if [[ ${SCREENSHOT_PREVIEW_JPEG:-0} == 1 ]] && command -v magick >/dev/null 2>&1; then
+if [[ ${KIRINUKI_JPEG:-0} == 1 ]] && command -v magick >/dev/null 2>&1; then
   jpg="${shot%.png}.jpg"
   if magick "$shot" -background white -flatten -quality "$QUALITY" "$jpg" 2>/dev/null && [[ -s $jpg ]]; then
     rm -f "$shot"

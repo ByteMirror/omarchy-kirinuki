@@ -6,14 +6,14 @@ import QtQuick
 import QtQuick.Effects
 import qs.Commons
 
-// Shottr-style capture preview.
+// Kirinuki -- 切り抜き, a clipping cut out of the screen.
 //
-// omarchy-screenshot-jpeg summons this panel with the capture path and the
-// cursor position, and it drops a small card next to the pointer: the shot,
-// a drag strip, a close button, and an icon row (Edit / Copy / Save / OCR /
-// Pin) whose shortcuts show on hover. Pin promotes the shot to a frameless
-// always-on-top window that can be dragged and scroll-zoomed, matching
-// Shottr's pinning.
+// bin/capture summons this panel with the capture path and the cursor
+// position, and it drops a small card next to the pointer: the shot, a drag
+// strip, a close button, and an icon row (Edit / Copy / Save / OCR / Pin)
+// whose shortcuts show on hover. Pin promotes the shot to a frameless
+// always-on-top window that can be dragged and scroll-zoomed, the way Shottr
+// pins one.
 //
 // Everything with a side effect goes through actions.sh; this file only
 // decides what to show and where.
@@ -112,7 +112,7 @@ Item {
   property var pins: []
   property int pinSerial: 0
   // Diagnostic: incremented by every wheel event that reaches a pin, from
-  // either delivery path. Read it with `omarchy-shell screenshot-preview probe`.
+  // either delivery path. Read it with `omarchy-shell kirinuki probe`.
   property int wheelSeen: 0
   // Serial of the pin under the pointer, 0 for none. Pins never take the
   // keyboard, so a keybind has to ask which one is hovered.
@@ -225,7 +225,7 @@ Item {
   signal editRequested(int serial)
 
   IpcHandler {
-    target: "screenshot-preview"
+    target: "kirinuki"
     function show(payloadJson: string): string { root.open(payloadJson); return "ok" }
     function close(): string { root.close(); return "ok" }
     // Pin without going through the card, for keybinds and for testing.
@@ -319,7 +319,7 @@ Item {
     anchors { top: true; bottom: true; left: true; right: true }
     mask: Region { item: card }
 
-    WlrLayershell.namespace: "omarchy-screenshot-preview"
+    WlrLayershell.namespace: "kirinuki-preview"
     WlrLayershell.layer: WlrLayer.Overlay
     // Keyboard only while the pointer is over the card. Holding it for the
     // whole 6s steals keystrokes from whatever the user is typing into --
@@ -712,7 +712,7 @@ Item {
       anchors { top: true; bottom: true; left: true; right: true }
       mask: Region { item: pinFrame }
 
-      WlrLayershell.namespace: "omarchy-screenshot-pin"
+      WlrLayershell.namespace: "kirinuki-pin"
       WlrLayershell.layer: WlrLayer.Overlay
       // A pin is a passive reference; it must never take the keyboard.
       WlrLayershell.keyboardFocus: WlrKeyboardFocus.None

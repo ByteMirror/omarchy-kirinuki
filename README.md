@@ -1,11 +1,16 @@
-# Screenshot Preview
+# Kirinuki
 
-A Shottr-style capture preview for Omarchy Quattro. Take a screenshot and a
-small card drops next to the pointer with the shot in it — annotate, copy,
-save, run OCR, or pin it to the screen. Nothing touches your screenshots
-folder until you press Save.
+**切り抜き** — *a clipping, cut out and kept.*
 
-![Screenshot Preview](preview.png)
+A capture preview for Omarchy Quattro, in the spirit of Shottr. Take a
+screenshot and a small card drops next to the pointer with the shot in it —
+annotate, copy, save, run OCR, or pin it to the screen. Nothing touches your
+screenshots folder until you press Save.
+
+Kirinuki is the clipping; [Tensaku](https://tensaku.dev/), Omarchy's own
+annotator, is the red pen you take to it.
+
+![Kirinuki](preview.png)
 
 Captures stage in `$XDG_RUNTIME_DIR` instead of landing in
 `~/Pictures/Screenshots` immediately, so the shots you took to read a number
@@ -32,14 +37,14 @@ and closed from its hover toolbar. Pins do not survive a shell restart.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/ByteMirror/omarchy-screenshot-preview.git --enable
+omarchy plugin add https://github.com/ByteMirror/omarchy-kirinuki.git --enable
 ```
 
 Then bind a key to the capture command. In `~/.config/hypr/bindings.lua`:
 
 ```lua
 local capture = os.getenv("HOME")
-  .. "/.config/omarchy/plugins/io.github.bytemirror.screenshot-preview/bin/capture"
+  .. "/.config/omarchy/plugins/io.github.bytemirror.kirinuki/bin/capture"
 
 o.bind("SUPER + SHIFT + S", "Screenshot", capture)
 o.bind("PRINT", "Screenshot", capture)
@@ -55,7 +60,7 @@ bound to it keep working exactly as before; this is a second, parallel path.
 ## Remove
 
 ```bash
-omarchy plugin remove io.github.bytemirror.screenshot-preview
+omarchy plugin remove io.github.bytemirror.kirinuki
 ```
 
 Then delete the keybinds you added above. The plugin writes nothing outside
@@ -70,7 +75,7 @@ Optional. Add settings to this plugin's entry in `~/.config/omarchy/shell.json`:
 {
   "plugins": [
     {
-      "id": "io.github.bytemirror.screenshot-preview",
+      "id": "io.github.bytemirror.kirinuki",
       "dismissAfter": 8000,
       "cardWidth": 380
     }
@@ -89,10 +94,10 @@ Environment variables, all optional:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `SCREENSHOT_PREVIEW_JPEG` | `0` | Set to `1` to transcode captures to JPEG |
-| `SCREENSHOT_PREVIEW_JPEG_QUALITY` | `92` | JPEG quality when the above is on |
-| `SCREENSHOT_PREVIEW_STAGING_DIR` | `$XDG_RUNTIME_DIR/omarchy-screenshot-preview` | Where captures wait |
-| `SCREENSHOT_PREVIEW_KEEP_MINUTES` | `1440` | Age at which an unsaved capture is dropped |
+| `KIRINUKI_JPEG` | `0` | Set to `1` to transcode captures to JPEG |
+| `KIRINUKI_JPEG_QUALITY` | `92` | JPEG quality when the above is on |
+| `KIRINUKI_STAGING_DIR` | `$XDG_RUNTIME_DIR/kirinuki` | Where captures wait |
+| `KIRINUKI_KEEP_MINUTES` | `1440` | Age at which an unsaved capture is dropped |
 
 Omarchy's own `OMARCHY_SCREENSHOT_DIR`, `OMARCHY_SCREENSHOT_EDITOR` and
 `OMARCHY_OCR_LANGS` are honoured as they are; this plugin does not shadow them.
@@ -131,7 +136,7 @@ prebuilt binary. Like every Omarchy plugin it runs unsandboxed inside the
 
 | Path | When |
 | --- | --- |
-| `$XDG_RUNTIME_DIR/omarchy-screenshot-preview/` | Every capture, until saved or aged out |
+| `$XDG_RUNTIME_DIR/kirinuki/` | Every capture, until saved or aged out |
 | Your screenshots folder | Only when you press Save |
 | The clipboard | Only when you press Copy or OCR |
 
@@ -141,7 +146,7 @@ Bare letters are used as shortcuts on purpose: Hyprland grabs its own binds
 before a focused surface sees the key, and every stock Omarchy bind carries at
 least `SUPER`, so a single letter is unambiguous while the card has focus.
 
-`omarchy-shell screenshot-preview probe` prints the panel's resolved geometry
+`omarchy-shell kirinuki probe` prints the panel's resolved geometry
 and state — useful in a bug report.
 
 ## License
