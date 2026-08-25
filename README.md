@@ -178,7 +178,9 @@ A path that passes is still only a name, so nothing with a side effect acts on
 one. Copy, Save, OCR and Edit each open the capture once, verify the *open
 file* — a regular file, yours, still the plain entry at that name, with a
 header that matches its extension — and then read it as `/dev/fd/N`, which
-resolves to that inode rather than to whatever the name means by then. Save
+resolves to that inode rather than to whatever the name means by then. The
+open itself is read-write, which on Linux returns at once even for a FIFO
+planted at the name, so the check cannot be stalled inside `open(2)`. Save
 writes from that descriptor to a temp file beside the destination and renames
 it into place, so a symlink planted at the predictable destination name is
 replaced, never written through. Edit hands the editor a private scratch copy

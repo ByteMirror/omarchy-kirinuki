@@ -137,7 +137,14 @@ kirinuki_open_image() {
   local -n kirinuki_out_fd=$1
   local canon opened=-1 type uid size held named fmt out m w h
   canon=$(kirinuki_safe_path "${2:-}") || return 1
-  { exec {opened}<"$canon"; } 2>/dev/null || return 1
+  # Opened read-write on purpose. A plain read open of a FIFO blocks until a
+  # writer shows up, so a FIFO swapped in at the name after the check above
+  # would park this shell inside open(2) before fstat ever gets to reject it.
+  # On Linux, open(O_RDWR) on a FIFO returns at once (fifo(7)), a regular file
+  # we own is writable anyway, and whatever came back is judged by fstat below
+  # before a byte is read. Anything else that could stall an open -- a device
+  # node -- cannot be created without CAP_MKNOD, and is refused by fstat too.
+  { exec {opened}<>"$canon"; } 2>/dev/null || return 1
 
   IFS='|' read -r type uid size held < <(stat -L -c '%F|%u|%s|%d:%i' -- "/dev/fd/$opened" 2>/dev/null)
   [[ $type == 'regular file' ]] || { exec {opened}<&-; return 1; }
