@@ -1,0 +1,242 @@
+#!/usr/bin/env python3
+"""Open a capture safely and hand the descriptor to a command.
+
+This is the one place in the plugin where a file name becomes an open file.
+Everything else -- actions.sh, bin/edit, bin/capture -- runs *underneath* this
+program and finds the capture already open on file descriptor 3, verified,
+and never touches the name again.
+
+    open --root DIR [--root DIR ...] -- PATH -- CMD [ARG ...]
+    open --root DIR [--root DIR ...] -- PATH
+
+The name is never opened as a whole: the trusted root (staging dir or
+screenshots folder) is opened once, every directory below it is stepped into
+with openat(O_DIRECTORY|O_NOFOLLOW) and checked to be ours, and the last
+component is opened with
+
+    O_RDWR | O_NOFOLLOW | O_NONBLOCK | O_NOCTTY | O_CLOEXEC
+
+relative to that directory descriptor. O_NOFOLLOW makes the open fail on a
+symlink instead of following it -- there is no interval between "is not a
+symlink" and "open" for anything to be swapped into, and a link to an
+existing device node is refused before the device is opened. O_NONBLOCK keeps
+a FIFO from parking us inside open(2), O_NOCTTY keeps a terminal from being
+acquired should something unexpected be opened after all. What came back is
+then judged by fstat on the descriptor -- regular, ours, within the size
+ceiling -- and its header is read from the descriptor, checked against the
+extension and the dimension ceilings.
+
+Only then is the descriptor dup'd to fd 3 (O_NONBLOCK cleared, inheritable)
+and CMD exec'd with KIRINUKI_FILE set to the canonical path and KIRINUKI_HELD
+to the path as it was given. Without a CMD the canonical path is printed and
+nothing else happens -- for callers that only need to know whether a name is
+a capture right now.
+
+Exit 1 on refusal, silently. Exit 2 on usage error.
+"""
+
+import fcntl
+import os
+import stat
+import struct
+import sys
+
+MAX_BYTES = int(os.environ.get("KIRINUKI_MAX_BYTES", 64 * 1024 * 1024))
+MAX_PIXELS = int(os.environ.get("KIRINUKI_MAX_PIXELS", 80_000_000))
+MAX_DIMENSION = int(os.environ.get("KIRINUKI_MAX_DIMENSION", 32768))
+HEADER_BYTES = 1024 * 1024  # how far into the file a JPEG SOF may sit
+
+DIR_FLAGS = os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+FILE_FLAGS = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_NOCTTY | os.O_CLOEXEC
+HELD_FD = 3
+
+
+def refuse():
+    sys.exit(1)
+
+
+def fmt_for(name):
+    lower = name.lower()
+    if lower.endswith(".png"):
+        return "png"
+    if lower.endswith(".jpg") or lower.endswith(".jpeg"):
+        return "jpg"
+    return None
+
+
+def ours(st):
+    return st.st_uid == os.getuid()
+
+
+def png_size(head):
+    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n" or head[12:16] != b"IHDR":
+        return None
+    return struct.unpack(">II", head[16:24])
+
+
+def jpeg_size(head):
+    if len(head) < 4 or head[:2] != b"\xff\xd8":
+        return None
+    i = 2
+    n = len(head)
+    while i + 4 <= n:
+        if head[i] != 0xFF:
+            return None
+        marker = head[i + 1]
+        if marker == 0xFF:  # fill byte
+            i += 1
+            continue
+        if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:  # standalone
+            i += 2
+            continue
+        if marker == 0xD9 or marker == 0xDA:  # EOI / SOS before any SOF
+            return None
+        seg = struct.unpack(">H", head[i + 2 : i + 4])[0]
+        if seg < 2:
+            return None
+        if 0xC0 <= marker <= 0xCF and marker not in (0xC4, 0xC8, 0xCC):
+            if i + 9 > n:
+                return None
+            height, width = struct.unpack(">HH", head[i + 5 : i + 9])
+            return width, height
+        i += 2 + seg
+    return None
+
+
+def dimensions(fmt, head):
+    return png_size(head) if fmt == "png" else jpeg_size(head)
+
+
+def open_root(root):
+    # The root is trusted by configuration, so symlinks *in* it (a linked
+    # $HOME, /run) are followed here and nowhere else. It still has to be a
+    # directory of ours that nobody else can write into.
+    try:
+        fd = os.open(root, os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+    except OSError:
+        return None
+    st = os.fstat(fd)
+    if not stat.S_ISDIR(st.st_mode) or not ours(st) or st.st_mode & stat.S_IWOTH:
+        os.close(fd)
+        return None
+    return fd
+
+
+def descend(dirfd, comp):
+    try:
+        fd = os.open(comp, DIR_FLAGS, dir_fd=dirfd)
+    except OSError:
+        return None
+    st = os.fstat(fd)
+    if not stat.S_ISDIR(st.st_mode) or not ours(st) or st.st_mode & stat.S_IWOTH:
+        os.close(fd)
+        return None
+    return fd
+
+
+def open_capture(roots, path):
+    if not path or not path.startswith("/") or "\n" in path or "\0" in path:
+        refuse()
+    fmt = fmt_for(path)
+    if fmt is None:
+        refuse()
+
+    parent, base = os.path.split(path)
+    if not base or base in (".", ".."):
+        refuse()
+    # Only to pick the root and the components below it; nothing below opens
+    # through this string.
+    canon_parent = os.path.realpath(parent)
+
+    for root in roots:
+        real_root = os.path.realpath(root)
+        if canon_parent == real_root:
+            rel = []
+        elif canon_parent.startswith(real_root.rstrip("/") + "/"):
+            rel = canon_parent[len(real_root.rstrip("/")) + 1 :].split("/")
+        else:
+            continue
+        if any(c in ("", ".", "..") for c in rel):
+            refuse()
+
+        dirfd = open_root(real_root)
+        if dirfd is None:
+            refuse()
+        for comp in rel:
+            nxt = descend(dirfd, comp)
+            os.close(dirfd)
+            if nxt is None:
+                refuse()
+            dirfd = nxt
+
+        try:
+            fd = os.open(base, FILE_FLAGS, dir_fd=dirfd)
+        except OSError:
+            refuse()
+        finally:
+            os.close(dirfd)
+
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or not ours(st):
+            refuse()
+        if not 0 < st.st_size <= MAX_BYTES:
+            refuse()
+
+        head = os.pread(fd, min(HEADER_BYTES, st.st_size), 0)
+        dims = dimensions(fmt, head)
+        if dims is None:
+            refuse()
+        w, h = dims
+        if not (0 < w <= MAX_DIMENSION and 0 < h <= MAX_DIMENSION and w * h <= MAX_PIXELS):
+            refuse()
+
+        canon = os.path.join(canon_parent, base)
+        return fd, canon
+
+    refuse()
+
+
+def main(argv):
+    roots = []
+    i = 0
+    while i < len(argv) and argv[i] == "--root":
+        if i + 1 >= len(argv):
+            return 2
+        roots.append(argv[i + 1])
+        i += 2
+    if not roots or i >= len(argv) or argv[i] != "--":
+        return 2
+    i += 1
+    if i >= len(argv):
+        return 2
+    path = argv[i]
+    cmd = argv[i + 2 :] if len(argv) > i + 1 and argv[i + 1] == "--" else None
+    if cmd is not None and not cmd:
+        return 2
+
+    fd, canon = open_capture(roots, path)
+
+    if cmd is None:
+        sys.stdout.write(canon)
+        return 0
+
+    # Hand it over: fd 3, blocking again, inheritable across the exec.
+    os.dup2(fd, HELD_FD)
+    if fd != HELD_FD:
+        os.close(fd)
+    flags = fcntl.fcntl(HELD_FD, fcntl.F_GETFL)
+    fcntl.fcntl(HELD_FD, fcntl.F_SETFL, flags & ~os.O_NONBLOCK)
+    os.set_inheritable(HELD_FD, True)
+
+    env = dict(os.environ)
+    env["KIRINUKI_FILE"] = canon
+    env["KIRINUKI_HELD"] = path
+    env["KIRINUKI_FD"] = str(HELD_FD)
+    try:
+        os.execvpe(cmd[0], cmd, env)
+    except OSError:
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

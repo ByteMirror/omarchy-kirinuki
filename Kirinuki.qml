@@ -65,11 +65,11 @@ Item {
   // then hand to actions.sh, so it is only accepted if it names a capture in
   // the staging dir or the screenshots folder. This stops an arbitrary file
   // being read into the card in the first place; it is display-only. Every
-  // side effect goes through actions.sh, which opens the file itself and
-  // verifies the open object (regular, ours, still the plain entry at that
-  // name, decodable within limits) before reading it through /dev/fd -- so
-  // whatever the name is swapped for after this check is never what gets
-  // copied, saved, read or edited.
+  // side effect goes through actions.sh, which runs beneath bin/open: the
+  // capture is opened there with O_NOFOLLOW relative to the trusted root,
+  // verified as an open object (regular, ours, within limits) and read as
+  // /dev/fd/3 -- so whatever the name is swapped for after this check is
+  // never what gets copied, saved, read or edited.
   readonly property string homeDir: Quickshell.env("HOME") || ""
 
   // XDG_PICTURES_DIR usually lives in user-dirs.dirs rather than in the

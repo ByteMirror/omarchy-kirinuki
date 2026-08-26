@@ -67,47 +67,27 @@ shot=$(kirinuki_safe_image "$shot") || exit 0
 # failed conversion beats losing the capture, and every step downstream
 # handles either format.
 #
-# The transcode reads the capture through a verified descriptor and writes
-# to a private temp file that is renamed into place, the same discipline as
-# every other read and write in this plugin.
+# The transcode runs beneath bin/open and reads the capture from fd 3, the
+# same discipline as every other read and write in this plugin.
 if [[ ${KIRINUKI_JPEG:-0} == 1 ]] && command -v magick >/dev/null 2>&1; then
-  fd=-1
-  if kirinuki_open_image fd "$shot"; then
-    jpg="${shot%.png}.jpg"
-    if tmp=$(mktemp -- "$STAGING/.kirinuki.XXXXXXXX"); then
-      if kirinuki_magick "png:/dev/fd/$fd" -background white -flatten \
-        -quality "$QUALITY" "jpg:$tmp" 2>/dev/null && kirinuki_output_ok "$tmp" \
-        && mv -fT -- "$tmp" "$jpg"; then
-        rm -f -- "$shot"
-        shot="$jpg"
-      else
-        rm -f -- "$tmp"
-      fi
-    fi
-    kirinuki_close fd
+  jpg="${shot%.png}.jpg"
+  if kirinuki_with_fd "$shot" kirinuki_transcode_jpg "$jpg" "$QUALITY"; then
+    rm -f -- "$shot"
+    shot="$jpg"
   fi
 fi
 
 # The panel is where Copy / Save / Edit / OCR / Pin live. Without it the
 # capture would sit in a scratch dir the user never sees, so fall back to the
-# stock behaviour: keep the file and say where it went.
+# stock behaviour: keep the file and say where it went. Save and copy both
+# happen beneath one bin/open, from the one descriptor, and only then is the
+# staged copy dropped.
 if ! "$here/summon" "$shot"; then
-  fd=-1
-  kirinuki_open_image fd "$shot" || exit 1
-
-  # Into the screenshots folder by the guard's save -- from the descriptor,
-  # via a temp file and a rename -- and only then is the staged copy dropped.
-  if dest=$(kirinuki_save_into "$fd" "$(basename "$shot")" "$(kirinuki_screenshot_dir)"); then
+  if dest=$(kirinuki_with_fd "$shot" kirinuki_promote "$(basename "$shot")" "$(kirinuki_screenshot_dir)"); then
     rm -f -- "$shot"
   else
     dest="$shot"
   fi
-
-  # Clipboard gets PNG whatever the file is: wl-copy advertises only the type
-  # it is given and most apps ask for image/png when pasting. The descriptor
-  # still holds the capture even though its staged name may be gone.
-  kirinuki_copy_png "$fd" "$(kirinuki_format "$shot")" >/dev/null 2>&1
-  kirinuki_close fd
 
   omarchy-notification-send "Screenshot saved to clipboard and file" "$(basename "$dest")" \
     --image "$dest" \

@@ -137,6 +137,7 @@ Shipped with Omarchy Quattro, already present on a stock install:
 | `omarchy-notification-send` | Result notifications |
 | `hyprctl` | Pointer position and monitor geometry |
 | `jq` | Reading the plugin id and building the summon payload |
+| `python3` | `bin/open`, the one place a capture is opened (see below); standard library only |
 | `wl-copy` | Clipboard |
 | `tensaku` / `tensaku-edit` | Annotation — Omarchy's default `OMARCHY_SCREENSHOT_EDITOR` |
 
@@ -169,23 +170,32 @@ before a focused surface sees the key, and every stock Omarchy bind carries at
 least `SUPER`, so a single letter is unambiguous while the card has focus.
 
 The panel only ever acts on a capture of yours. A path reaching it — over the
-shell's IPC, from a keybind, from anywhere else — is accepted only if it is an
-existing regular file you own, not a symlink, named `.png`/`.jpg`/`.jpeg`, and
-inside the staging dir or your screenshots folder; `lib/guard.sh` is the single
-place that decides.
+shell's IPC, from a keybind, from anywhere else — is accepted only if it names
+a `.png`/`.jpg`/`.jpeg` inside the staging dir or your screenshots folder, and
+only what is actually there decides the rest.
 
-A path that passes is still only a name, so nothing with a side effect acts on
-one. Copy, Save, OCR and Edit each open the capture once, verify the *open
-file* — a regular file, yours, still the plain entry at that name, with a
-header that matches its extension — and then read it as `/dev/fd/N`, which
-resolves to that inode rather than to whatever the name means by then. The
-open itself is read-write, which on Linux returns at once even for a FIFO
-planted at the name, so the check cannot be stalled inside `open(2)`. Save
-writes from that descriptor to a temp file beside the destination and renames
-it into place, so a symlink planted at the predictable destination name is
-replaced, never written through. Edit hands the editor a private scratch copy
-and folds each save back into the held inode. The panel itself only displays
-the image; every side effect re-opens and re-verifies at the moment of use.
+A name is used exactly once, to open the file, and that open is what has to be
+safe — so it happens in `bin/open`, a small Python program, because a shell
+cannot pass flags to `open(2)`. It opens the trusted root directory, steps
+down through any subdirectories on directory descriptors
+(`openat` with `O_DIRECTORY|O_NOFOLLOW`, each one a directory of yours that
+nobody else can write into), and opens the capture itself relative to that
+descriptor with `O_RDWR|O_NOFOLLOW|O_NONBLOCK|O_NOCTTY`. A symlink at any
+component makes the open fail rather than be followed, so there is no interval
+between "is not a link" and "open" for one to be planted in; a FIFO cannot stall
+it; a device cannot be reached. What was opened is then judged by `fstat` on the
+descriptor — a regular file, yours, within the size ceiling — and its header is
+read from that descriptor and checked against the extension and the dimension
+ceilings.
+
+Only then does `bin/open` hand the descriptor down as fd 3 and run the helper
+beneath it: Copy, Save, OCR and Edit each read `/dev/fd/3` and never the path
+again. Save writes from that descriptor to a temp file beside the destination
+and renames it into place, so a symlink planted at the predictable destination
+name is replaced, never written through. Edit hands the editor a private
+scratch copy and folds each save back into the held inode. The panel itself
+only displays the image; every side effect is opened and verified afresh at the
+moment of use, and a descriptor it did not open itself is never trusted.
 
 Decoding is bounded as well: the size, pixel, dimension, output-size and
 wall-clock ceilings in the table above apply to every image and OCR run, so a

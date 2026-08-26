@@ -5,10 +5,10 @@
 # An edited capture is still only staged, so the panel has to return: without
 # it there is no way left to save, copy, or pin what was just annotated.
 #
-# The editor never sees the staged file. The capture is opened once through
-# lib/guard.sh and held for the whole session; the editor works on a private
-# scratch copy, and every save is folded back into the held inode by writing
-# through the descriptor. So what gets edited is what was verified, and what
+# The editor never sees the staged file. The capture is opened once, by
+# bin/open, and held on fd 3 for the whole session; the editor works on a
+# private scratch copy, and every save is folded back into the held inode by
+# writing through the descriptor. So what gets edited is what was verified, and what
 # gets overwritten is that same object -- not whatever the staged name has
 # been pointed at since.
 #
@@ -52,9 +52,9 @@ fi
 
 # Opening an editor on an arbitrary path is exactly what the guard is for:
 # only a staged or saved capture of ours, within the decode limits, gets one.
-file=$(kirinuki_safe_path "${1:-}") || exit 1
-fd=-1
-kirinuki_open_image fd "$file" || exit 1
+kirinuki_hold "${1:-}" "$0" "$@" || exit 1
+file=$KIRINUKI_FILE
+fd=$KIRINUKI_FD
 fmt=$(kirinuki_format "$file") || exit 1
 
 if [[ $fmt == jpg ]] && ! command -v magick >/dev/null 2>&1; then
@@ -85,7 +85,7 @@ kirinuki_output_ok "$src" || exit 1
 # the same bounded ImageMagick limits as everything else. JPEG has no alpha
 # channel; flatten onto white so transparency in the annotations does not
 # come out black. A half-written PNG just fails and gets retried on the next
-# poll. The write goes to /dev/fd/N, which truncates and rewrites the inode
+# poll. The write goes to /dev/fd/3, which truncates and rewrites the inode
 # that was verified at open -- the staged name is never touched again.
 fold_back() {
   local edited="$1" staged

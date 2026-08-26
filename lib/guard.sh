@@ -10,15 +10,14 @@
 # extension, and inside the staging dir or the screenshots folder. Anything
 # else is refused before a single byte is read.
 #
-# And a path that passes is still only a name. The entry it names can be
-# swapped -- for a symlink, for another file -- in the instant between the
-# check and the open, so nothing with a side effect ever acts on a name. It
-# asks kirinuki_open_image for a file descriptor, whose open object is what
-# gets verified, and reads it as /dev/fd/N, which on Linux resolves to that
-# inode and not to whatever the name has come to mean since. Writes go the
-# same way: a save lands beside its destination and is renamed into place, so
-# a symlink planted at the destination is replaced rather than written
-# through.
+# And a name is only ever used once: to open the file, in bin/open, with
+# flags a shell cannot set (O_NOFOLLOW|O_NONBLOCK|O_NOCTTY, relative to a
+# directory descriptor walked down from the trusted root). What was opened is
+# what gets verified, and every helper runs beneath bin/open reading fd 3 --
+# as /dev/fd/3, which on Linux resolves to that inode and not to whatever the
+# name has come to mean since. Writes go the same way: a save lands beside
+# its destination and is renamed into place, so a symlink planted at the
+# destination is replaced rather than written through.
 #
 # Decoding is bounded too. ImageMagick and Tesseract will happily spend all the
 # memory and time in the world on a crafted file, and they run inside the
@@ -84,108 +83,80 @@ kirinuki_format() {
   esac
 }
 
-# The name-level half of the boundary. Prints the canonical path on success,
-# nothing on refusal. Enough to decide what a name *may* be; only
-# kirinuki_open_image below decides what it *is*.
-#
-# Symlinks are rejected at the named component rather than followed, so a link
-# planted in the staging dir cannot borrow the trust of the directory it sits
-# in; the parents are canonicalised, because a symlinked $HOME or /run is
-# ordinary and harmless.
-kirinuki_safe_path() {
-  local file="${1:-}" canon root staging shots
-  [[ -n $file && $file == /* ]] || return 1
-  [[ $file == *$'\n'* ]] && return 1
-  kirinuki_format "$file" >/dev/null || return 1
-  [[ -L $file ]] && return 1
-  [[ -f $file ]] || return 1
-
-  canon=$(realpath -e -- "$file" 2>/dev/null) || return 1
-  [[ -f $canon && ! -L $canon ]] || return 1
-  [[ $(stat -c '%u' -- "$canon" 2>/dev/null) == "$(id -u)" ]] || return 1
-
-  staging=$(realpath -m -- "$(kirinuki_staging_dir)" 2>/dev/null) || return 1
-  shots=$(realpath -m -- "$(kirinuki_screenshot_dir)" 2>/dev/null) || return 1
-  for root in "$staging" "$shots"; do
-    [[ -n $root && $canon == "$root"/* ]] || continue
-    printf '%s' "$canon"
-    return 0
-  done
-  return 1
+# The boundary itself is bin/open, and it is Python for one reason: bash
+# cannot pass flags to open(2). A shell redirection follows a symlink and
+# blocks on a FIFO, and every check a script could make before it is a check
+# on a name that may already mean something else. bin/open steps from the
+# trusted root down to the capture on directory descriptors and opens the
+# last component with O_NOFOLLOW|O_NONBLOCK|O_NOCTTY, judges the *open* object
+# with fstat, reads the header from the descriptor, and only then hands fd 3
+# to whatever runs beneath it.
+kirinuki_open_helper() {
+  printf '%s' "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)/bin/open"
 }
 
-# The object-level half of the boundary. Opens the capture and verifies what
-# was actually opened, then hands the descriptor back in the named variable.
-#
-#   kirinuki_open_image fd /path/to/capture.png || exit 1
-#   ... "/dev/fd/$fd" ...
-#   kirinuki_close fd
-#
-# fstat on the descriptor says it is a regular file, ours, and within the size
-# ceiling; lstat on the name says the name is still a plain entry -- not a
-# symlink -- for that same inode, so the object held is the one that was vetted
-# at that location and not something reached through a link planted since.
-# Only then is the header read, from the descriptor, and only the first frame:
-# a multi-frame file costs nothing extra to refuse here but a lot to decode
-# later. Its real format has to match the extension, and its pixel count and
-# sides have to fit the ceilings.
-#
-# Consumers must read /dev/fd/N rather than the descriptor itself: each open of
-# that path is a fresh view of the same inode from offset zero, so several
-# readers in a row all see the whole file.
-kirinuki_open_image() {
-  local -n kirinuki_out_fd=$1
-  local canon opened=-1 type uid size held named fmt out m w h
-  canon=$(kirinuki_safe_path "${2:-}") || return 1
-  # Opened read-write on purpose. A plain read open of a FIFO blocks until a
-  # writer shows up, so a FIFO swapped in at the name after the check above
-  # would park this shell inside open(2) before fstat ever gets to reject it.
-  # On Linux, open(O_RDWR) on a FIFO returns at once (fifo(7)), a regular file
-  # we own is writable anyway, and whatever came back is judged by fstat below
-  # before a byte is read. Anything else that could stall an open -- a device
-  # node -- cannot be created without CAP_MKNOD, and is refused by fstat too.
-  { exec {opened}<>"$canon"; } 2>/dev/null || return 1
+# The two places a capture may live. Anything else is not ours to touch.
+kirinuki_root_args() {
+  kirinuki_roots=(--root "$(kirinuki_staging_dir)" --root "$(kirinuki_screenshot_dir)")
+}
 
-  IFS='|' read -r type uid size held < <(stat -L -c '%F|%u|%s|%d:%i' -- "/dev/fd/$opened" 2>/dev/null)
-  [[ $type == 'regular file' ]] || { exec {opened}<&-; return 1; }
-  [[ $uid == "$(id -u)" ]] || { exec {opened}<&-; return 1; }
-  [[ $size =~ ^[0-9]+$ ]] && (( size > 0 && size <= KIRINUKI_MAX_BYTES )) || { exec {opened}<&-; return 1; }
-
-  named=$(stat -c '%F|%d:%i' -- "$canon" 2>/dev/null)
-  [[ $named == "regular file|$held" ]] || { exec {opened}<&-; return 1; }
-
-  if command -v magick >/dev/null 2>&1; then
-    fmt=$(kirinuki_format "$canon") || { exec {opened}<&-; return 1; }
-    out=$(timeout "$KIRINUKI_TIMEOUT" magick identify -quiet "${kirinuki_im_limits[@]}" \
-      -format '%m %w %h' "${fmt}:/dev/fd/${opened}[0]" 2>/dev/null) || { exec {opened}<&-; return 1; }
-    read -r m w h <<<"$out"
-    case "$fmt:$m" in png:PNG | jpg:JPEG | jpg:JPG) ;; *) exec {opened}<&-; return 1 ;; esac
-    [[ $w =~ ^[0-9]+$ && $h =~ ^[0-9]+$ ]] || { exec {opened}<&-; return 1; }
-    (( w > 0 && h > 0 )) || { exec {opened}<&-; return 1; }
-    (( w <= KIRINUKI_MAX_DIMENSION && h <= KIRINUKI_MAX_DIMENSION )) || { exec {opened}<&-; return 1; }
-    (( w * h <= KIRINUKI_MAX_PIXELS )) || { exec {opened}<&-; return 1; }
+# Run the rest of this script with <path> held open on fd 3.
+#
+#   kirinuki_hold "$file" "$0" "$@" || exit 1
+#   file=$KIRINUKI_FILE   # canonical
+#   ... "/dev/fd/3" ...
+#
+# The first time through there is nothing held, so the script replaces itself
+# with bin/open, which opens and verifies the capture and exec's the script
+# again -- same arguments -- with fd 3 in place and KIRINUKI_FILE set. The
+# second time through this returns at once. A script exec'd by another that
+# already holds the same capture (actions.sh -> bin/edit) inherits the
+# descriptor and does not open anything.
+#
+# A held descriptor is reused only if it is what the environment claims: a
+# regular file of ours whose dev:inode is the plain entry at KIRINUKI_FILE
+# right now. Anything else -- wrong file, closed, replaced, a descriptor
+# planted by a caller -- is dropped and the capture is opened afresh through
+# bin/open, never on the say-so of an environment variable.
+kirinuki_hold() {
+  local path="${1:-}" type uid held named
+  shift
+  if [[ ${KIRINUKI_FD:-} == 3 && -n ${KIRINUKI_FILE:-} \
+    && ( $path == "${KIRINUKI_HELD:-}" || $path == "$KIRINUKI_FILE" ) ]]; then
+    IFS='|' read -r type uid held < <(stat -L -c '%F|%u|%d:%i' -- /dev/fd/3 2>/dev/null)
+    named=$(stat -c '%F|%d:%i' -- "$KIRINUKI_FILE" 2>/dev/null)
+    [[ $type == 'regular file' && $uid == "$(id -u)" && $named == "regular file|$held" ]] && return 0
   fi
-
-  kirinuki_out_fd=$opened
+  exec 3<&-
+  unset KIRINUKI_FILE KIRINUKI_HELD KIRINUKI_FD
+  local -a kirinuki_roots
+  kirinuki_root_args
+  exec "$(kirinuki_open_helper)" "${kirinuki_roots[@]}" -- "$path" -- "$@"
 }
 
-kirinuki_close() {
-  local -n kirinuki_out_fd=$1
-  [[ $kirinuki_out_fd =~ ^[0-9]+$ ]] && exec {kirinuki_out_fd}<&-
-  kirinuki_out_fd=-1
+# Run one guard function with <path> held open on fd 3, in a child. For a
+# script that needs a capture open for one step rather than for its whole
+# run (bin/capture transcoding, then saving). Prints whatever the function
+# prints; returns its status.
+#
+#   kirinuki_with_fd "$file" kirinuki_save_into 3 name dir
+kirinuki_with_fd() {
+  local path="${1:-}"
+  shift
+  local -a kirinuki_roots
+  kirinuki_root_args
+  "$(kirinuki_open_helper)" "${kirinuki_roots[@]}" -- "$path" -- \
+    "$BASH" -c 'source -- "$1" && shift && "$@"' _ "${BASH_SOURCE[0]}" "$@"
 }
 
-# Both halves, for a caller that only needs to know whether a name is a
-# capture right now -- bin/summon, which hands the panel a name to display and
-# cannot hand it a descriptor. Prints the canonical path. The panel only ever
-# shows the image; every side effect re-opens and re-verifies at the moment of
-# use.
+# Whether <path> is a capture right now: opened and verified exactly as above,
+# then let go. Prints the canonical path. For bin/summon, which hands the
+# panel a name to display and cannot hand it a descriptor; the panel only
+# shows the image, and every side effect holds its own descriptor.
 kirinuki_safe_image() {
-  local canon fd=-1
-  canon=$(kirinuki_safe_path "${1:-}") || return 1
-  kirinuki_open_image fd "$canon" || return 1
-  kirinuki_close fd
-  printf '%s' "$canon"
+  local -a kirinuki_roots
+  kirinuki_root_args
+  "$(kirinuki_open_helper)" "${kirinuki_roots[@]}" -- "${1:-}"
 }
 
 # Every ImageMagick call in this plugin goes through here: bounded, and given
@@ -267,4 +238,35 @@ kirinuki_save_into() {
   fi
   rm -f -- "$tmp"
   return 1
+}
+
+# Write the PNG on fd 3 as a JPEG at <dest>, via a temp file beside it and a
+# rename. Runs beneath bin/open (see kirinuki_with_fd). JPEG has no alpha
+# channel, so the image is flattened onto white -- otherwise transparency
+# comes out black.
+#
+#   kirinuki_transcode_jpg <dest> <quality>
+kirinuki_transcode_jpg() {
+  local dest="${1:-}" quality="${2:-92}" tmp
+  [[ -n $dest && $dest == /* ]] || return 1
+  tmp=$(mktemp -- "$(dirname -- "$dest")/.kirinuki.XXXXXXXX") || return 1
+  if kirinuki_magick "png:/dev/fd/$KIRINUKI_FD" -background white -flatten \
+    -quality "$quality" "jpg:$tmp" 2>/dev/null && kirinuki_output_ok "$tmp" \
+    && mv -fT -- "$tmp" "$dest"; then
+    return 0
+  fi
+  rm -f -- "$tmp"
+  return 1
+}
+
+# The no-panel fallback: save the capture on fd 3 into <dir> as <name> and
+# put it on the clipboard, from that one descriptor. Prints the destination.
+# Runs beneath bin/open (see kirinuki_with_fd).
+#
+#   kirinuki_promote <name> <dir>
+kirinuki_promote() {
+  local name="${1:-}" dir="${2:-}" dest
+  dest=$(kirinuki_save_into "$KIRINUKI_FD" "$name" "$dir") || return 1
+  kirinuki_copy_png "$KIRINUKI_FD" "$(kirinuki_format "$KIRINUKI_FILE")" >/dev/null 2>&1
+  printf '%s' "$dest"
 }

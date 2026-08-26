@@ -3,14 +3,13 @@
 # Side-effect actions for the screenshot preview panel. The QML side stays
 # declarative and hands work here so shell quoting lives in one place.
 #
-# Every action starts by putting its argument through lib/guard.sh: the panel's
-# IPC is reachable by anything that can talk to the shell, so a path only
-# counts if it names a staged or saved capture of ours. And the name is only
-# used to open the file once: the open descriptor is what gets verified --
-# regular, ours, still the plain entry at that name, decodable within the
-# guard's size, dimension and time limits -- and every action below reads
-# /dev/fd/N, never the path again. Nothing swapped in at the name between the
-# check and the use can be what gets copied, saved, read or edited.
+# Every action runs beneath bin/open (see kirinuki_hold in lib/guard.sh): the
+# panel's IPC is reachable by anything that can talk to the shell, so the
+# argument is opened there with O_NOFOLLOW|O_NONBLOCK relative to the staging
+# dir or screenshots folder, judged as an open object -- regular, ours, within
+# the guard's size and dimension limits -- and handed down as fd 3. Every
+# action below reads /dev/fd/3 and never the path. Nothing swapped in at the
+# name can be what gets copied, saved, read or edited.
 #
 # Usage: actions.sh <copy|save|ocr|edit> <file>
 
@@ -20,9 +19,10 @@ here=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd) || exit 1
 source "$here/lib/guard.sh" || exit 1
 
 action="${1:-}"
-file=$(kirinuki_safe_path "${2:-}") || exit 1
-fd=-1
-kirinuki_open_image fd "$file" || exit 1
+case "$action" in copy | save | ocr | edit) ;; *) exit 2 ;; esac
+kirinuki_hold "${2:-}" "$0" "$@" || exit 1
+file=$KIRINUKI_FILE
+fd=$KIRINUKI_FD
 fmt=$(kirinuki_format "$file") || exit 1
 
 notify() { omarchy-notification-send "$@" >/dev/null 2>&1 || true; }
@@ -65,9 +65,8 @@ case "$action" in
     ;;
 
   edit)
-    # bin/edit holds the capture open for the whole editing session and folds
-    # the result back into that same inode, so it takes its own descriptor.
-    kirinuki_close fd
+    # bin/edit keeps the capture open for the whole editing session and folds
+    # the result back into that same inode. It inherits this descriptor.
     exec "$here/bin/edit" "$file"
     ;;
 

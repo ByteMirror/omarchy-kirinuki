@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.bytemirror.kirinuki",
   "name": "Kirinuki",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "author": "ByteMirror",
   "license": "MIT",
   "description": "A capture preview card at the cursor: annotate, copy, save, OCR, or pin the shot to your screen",
