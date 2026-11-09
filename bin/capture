@@ -8,10 +8,9 @@
 # pressed in the preview (see the plugin's actions.sh). A shot the user
 # ignores simply ages out of the scratch dir.
 #
-# omarchy-capture-screenshot always writes PNG into its output directory, so
-# it is wrapped rather than edited: capture with `save` (skipping the editor
-# and notification) into a redirected output dir, then hand the file to the
-# panel.
+# Selection and capture are slurp + grim, straight into the staging dir, then
+# the file is handed to the panel. (Omarchy 4.5's omarchy-capture-screenshot
+# is omasnap with its own overlay and toast, so it is not used.)
 #
 # Usage: capture [smart|region|windows|fullscreen]
 #
@@ -47,21 +46,41 @@ STAGING=$(kirinuki_stage_ensure) || exit 1
 # do not survive a shell restart anyway.
 find "$STAGING" -maxdepth 1 -type f -mmin "+$KEEP_MINUTES" -delete 2>/dev/null
 
-list_staged() { find "$STAGING" -maxdepth 1 -type f -name '*.png' -printf '%f\n' 2>/dev/null | sort; }
+# Window boxes on every monitor's visible workspace, in slurp's "x,y wxh"
+# format, so a click picks a window and a drag still draws a region.
+window_boxes() {
+  local active
+  active=$(hyprctl monitors -j | jq -r '[.[] | .activeWorkspace.id, .specialWorkspace.id] | map(select(. != 0)) | join(",")')
+  hyprctl clients -j | jq -r --arg ws "$active" '
+    ($ws | split(",") | map(tonumber)) as $ids
+    | .[] | select(.mapped and (.hidden | not) and (.workspace.id as $w | $ids | index($w)))
+    | "\(.at[0]),\(.at[1]) \(.size[0])x\(.size[1])"'
+}
 
-if command -v omasnap >/dev/null 2>&1; then
-  # Omarchy 4.5+: omarchy-capture-screenshot became a wrapper around omasnap
-  # that always adds --notify (Omarchy's own "Screenshot saved / Open / Edit"
-  # toast) and prints nothing on --save. Call omasnap directly without
-  # --notify, and find the capture as the new file in the staging dir.
-  before=$(list_staged)
-  OMASNAP_SCREENSHOT_DIR="$STAGING" omasnap --save "$MODE" >/dev/null 2>&1 || exit 1
-  name=$(comm -13 <(printf '%s\n' "$before") <(list_staged) | tail -n 1)
-  shot=${name:+$STAGING/$name}
+# Kirinuki does its own selection with slurp + grim. Omarchy 4.5 moved
+# omarchy-capture-screenshot onto omasnap, whose overlay replaces this
+# plugin's flow -- so Omarchy's capture command is no longer used at all.
+# The hotkey toggles: pressed again mid-selection, it cancels.
+if pkill -x slurp 2>/dev/null; then exit 0; fi
+
+case "$MODE" in
+  fullscreen)
+    output=$(hyprctl monitors -j | jq -r '.[] | select(.focused) | .name')
+    geom=""
+    ;;
+  region) geom=$(slurp 2>/dev/null) ;;
+  windows) geom=$(window_boxes | slurp -r 2>/dev/null) ;;
+  smart) geom=$(window_boxes | slurp -o 2>/dev/null) ;;
+esac
+
+# slurp exits non-zero when the selection is cancelled: a normal no-op.
+if [[ $MODE != fullscreen && -z $geom ]]; then exit 0; fi
+
+shot="$STAGING/screenshot-$(date +%Y-%m-%d_%H-%M-%S).png"
+if [[ $MODE == fullscreen ]]; then
+  grim -o "$output" "$shot" || exit 1
 else
-  # Before 4.5: `save` prints the saved path; take the last line in case
-  # anything else (e.g. the "created screenshot directory" notice) comes first.
-  shot=$(OMARCHY_SCREENSHOT_DIR="$STAGING" omarchy-capture-screenshot "$MODE" save | tail -n 1) || exit 1
+  grim -g "$geom" "$shot" || exit 1
 fi
 
 # Empty output means the selection was cancelled, or a running slurp was
