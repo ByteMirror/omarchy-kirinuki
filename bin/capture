@@ -51,9 +51,13 @@ find "$STAGING" -maxdepth 1 -type f -mmin "+$KEEP_MINUTES" -delete 2>/dev/null
 window_boxes() {
   local active
   active=$(hyprctl monitors -j | jq -r '[.[] | .activeWorkspace.id, .specialWorkspace.id] | map(select(. != 0)) | join(",")')
-  hyprctl clients -j | jq -r --arg ws "$active" '
+  # KIRINUKI_IGNORE_CLASSES: space-separated window classes never offered as
+  # boxes, e.g. an app's invisible always-mapped overlay window.
+  hyprctl clients -j | jq -r --arg ws "$active" --arg ignore "${KIRINUKI_IGNORE_CLASSES:-}" '
     ($ws | split(",") | map(tonumber)) as $ids
+    | ($ignore | split(" ") | map(select(. != ""))) as $skip
     | .[] | select(.mapped and (.hidden | not) and (.workspace.id as $w | $ids | index($w)))
+    | select(.class as $c | $skip | index($c) | not)
     | "\(.at[0]),\(.at[1]) \(.size[0])x\(.size[1])"'
 }
 
