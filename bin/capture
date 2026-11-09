@@ -47,9 +47,22 @@ STAGING=$(kirinuki_stage_ensure) || exit 1
 # do not survive a shell restart anyway.
 find "$STAGING" -maxdepth 1 -type f -mmin "+$KEEP_MINUTES" -delete 2>/dev/null
 
-# `save` prints the saved path; take the last line in case anything else
-# (e.g. the "created screenshot directory" notice) is written first.
-shot=$(OMARCHY_SCREENSHOT_DIR="$STAGING" omarchy-capture-screenshot "$MODE" save | tail -n 1) || exit 1
+list_staged() { find "$STAGING" -maxdepth 1 -type f -name '*.png' -printf '%f\n' 2>/dev/null | sort; }
+
+if command -v omasnap >/dev/null 2>&1; then
+  # Omarchy 4.5+: omarchy-capture-screenshot became a wrapper around omasnap
+  # that always adds --notify (Omarchy's own "Screenshot saved / Open / Edit"
+  # toast) and prints nothing on --save. Call omasnap directly without
+  # --notify, and find the capture as the new file in the staging dir.
+  before=$(list_staged)
+  OMASNAP_SCREENSHOT_DIR="$STAGING" omasnap --save "$MODE" >/dev/null 2>&1 || exit 1
+  name=$(comm -13 <(printf '%s\n' "$before") <(list_staged) | tail -n 1)
+  shot=${name:+$STAGING/$name}
+else
+  # Before 4.5: `save` prints the saved path; take the last line in case
+  # anything else (e.g. the "created screenshot directory" notice) comes first.
+  shot=$(OMARCHY_SCREENSHOT_DIR="$STAGING" omarchy-capture-screenshot "$MODE" save | tail -n 1) || exit 1
+fi
 
 # Empty output means the selection was cancelled, or a running slurp was
 # dismissed -- both are a normal no-op, not a failure.

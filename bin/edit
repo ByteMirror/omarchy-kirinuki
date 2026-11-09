@@ -28,7 +28,14 @@
 set -uo pipefail
 
 QUALITY="${KIRINUKI_JPEG_QUALITY:-92}"
-EDITOR_CMD="${OMARCHY_SCREENSHOT_EDITOR:-tensaku-edit}"
+# Omarchy 4.5 dropped Tensaku for omasnap's own editor.
+if [[ -n ${OMARCHY_SCREENSHOT_EDITOR:-} ]]; then
+  EDITOR_CMD=$OMARCHY_SCREENSHOT_EDITOR
+elif command -v tensaku >/dev/null 2>&1; then
+  EDITOR_CMD=tensaku-edit
+else
+  EDITOR_CMD=omasnap
+fi
 
 here=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd) || exit 1
 source "$here/../lib/guard.sh" || exit 1
@@ -106,6 +113,23 @@ fold_back() {
 
 # %y carries nanoseconds, so two saves in the same second are still distinct.
 current_stamp() { stat -c '%y %s' "$1" 2>/dev/null; }
+
+# omasnap's editor (Omarchy 4.5+) writes its result into
+# OMASNAP_SCREENSHOT_DIR rather than over the input, so point that at a private
+# dir and fold back the newest file once the editor exits. If it saved nothing
+# but rewrote the input instead, fold that.
+if [[ $EDITOR_CMD == omasnap ]]; then
+  outdir="$tmpdir/out"
+  mkdir -p "$outdir" || exit 1
+  before=$(current_stamp "$src")
+  OMASNAP_SCREENSHOT_DIR="$outdir" omasnap --file "$src" --editor window >/dev/null 2>&1
+  edited=$(find "$outdir" -maxdepth 1 -type f -name '*.png' -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -n 1 | cut -d' ' -f2-)
+  if [[ -z $edited && $(current_stamp "$src") != "$before" ]]; then edited=$src; fi
+  if [[ -n $edited ]] && fold_back "$edited"; then
+    "$here/summon" "$file"
+  fi
+  exit 0
+fi
 
 # A custom editor edits the scratch copy in place; fold once it exits.
 if [[ $EDITOR_CMD != tensaku-edit ]]; then
