@@ -26,6 +26,7 @@
 # honoured as-is; this plugin does not shadow them.
 
 set -uo pipefail
+umask 077 # staged captures are private, whichever tool writes them
 
 here=$(cd -- "$(dirname -- "$(readlink -f -- "$0")")" && pwd) || exit 1
 source "$here/../lib/guard.sh" || exit 1
@@ -74,18 +75,27 @@ monitors=$(hyprctl monitors -j)
 # :hover styles) before grim could see it. So every output is grabbed first,
 # hyprpicker holds that frozen picture on screen while the user selects, and
 # the selection is cropped out of the grab.
+#
+# The grabs are raw PPM: PNG-compressing a 4K frame costs grim ~0.8 s, all of
+# it before slurp can appear; PPM takes ~60 ms and holds the same pixels.
 picker=""
 if [[ $MODE != fullscreen ]]; then
   frozen=$(mktemp -d "$STAGING/.frozen.XXXXXX") || exit 1
   trap '[[ -n $picker ]] && kill "$picker" 2>/dev/null; rm -rf -- "$frozen"' EXIT
   for out in $(jq -r '.[].name' <<<"$monitors"); do
-    grim -o "$out" "$frozen/$out.png" &
+    grim -t ppm -o "$out" "$frozen/$out.ppm" &
   done
   wait
   if command -v hyprpicker >/dev/null 2>&1; then
     hyprpicker -r -z -d -q >/dev/null 2>&1 &
     picker=$!
-    sleep 0.1 # let the freeze map before slurp draws over it
+    # slurp must map after the freeze or the freeze covers it. Wait for the
+    # layer (~60 ms), capped at 0.5 s so a hyprpicker that never maps cannot
+    # hold up the selection.
+    for _ in {1..50}; do
+      hyprctl layers -j | jq -e '[.. | .namespace? | select(. == "hyprpicker")] | length > 0' >/dev/null && break
+      sleep 0.01
+    done
   fi
 fi
 
@@ -118,12 +128,22 @@ frozen_crop() {
     ] | first // empty' <<<"$monitors"
 }
 
+want_jpg=0
+[[ ${KIRINUKI_JPEG:-0} == 1 ]] && command -v magick >/dev/null 2>&1 && want_jpg=1
+
 shot="$STAGING/screenshot-$(date +%Y-%m-%d_%H-%M-%S).png"
 if [[ $MODE == fullscreen ]]; then
   grim -o "$output" "$shot" || exit 1
-elif read -r out crop < <(frozen_crop "$geom") && [[ -s $frozen/$out.png ]] &&
-  kirinuki_magick "png:$frozen/$out.png" -crop "$crop" +repage "png:$shot" 2>/dev/null; then
-  :
+elif read -r out crop < <(frozen_crop "$geom") && [[ -s $frozen/$out.ppm ]]; then
+  # In JPEG mode the crop is encoded straight to JPEG: going through PNG first
+  # costs up to a second on a full 4K frame for the same pixels.
+  if ((want_jpg)); then
+    shot="${shot%.png}.jpg"
+    kirinuki_magick "ppm:$frozen/$out.ppm" -crop "$crop" +repage \
+      -background white -flatten -quality "$QUALITY" "jpg:$shot" 2>/dev/null || exit 1
+  else
+    kirinuki_magick "ppm:$frozen/$out.ppm" -crop "$crop" +repage "png:$shot" 2>/dev/null || exit 1
+  fi
 else
   # ponytail: a selection spanning two monitors (or on a rotated one) is shot
   # live and loses hover; stitch the frozen grabs if that ever matters.
@@ -148,7 +168,7 @@ shot=$(kirinuki_safe_image "$shot") || exit 0
 #
 # The transcode runs beneath bin/open and reads the capture from fd 3, the
 # same discipline as every other read and write in this plugin.
-if [[ ${KIRINUKI_JPEG:-0} == 1 ]] && command -v magick >/dev/null 2>&1; then
+if ((want_jpg)) && [[ $shot == *.png ]]; then
   jpg="${shot%.png}.jpg"
   if kirinuki_with_fd "$shot" kirinuki_transcode_jpg "$jpg" "$QUALITY"; then
     rm -f -- "$shot"
