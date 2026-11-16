@@ -7,8 +7,11 @@ screenshot and a small card drops next to the pointer with the shot in it —
 annotate, copy, save, run OCR, or pin it to the screen. Nothing touches your
 screenshots folder until you press Save.
 
-Kirinuki is the clipping; [Tensaku](https://tensaku.dev/), Omarchy's own
-annotator, is the red pen you take to it.
+Kirinuki is the clipping; Omarchy's own annotator (omasnap since Omarchy 4.5,
+[Tensaku](https://tensaku.dev/) before it) is the red pen you take to it.
+
+The screen freezes the moment you press the key, so whatever you were hovering
+— a tooltip, an open menu, a `:hover` style — is still there in the shot.
 
 ![Kirinuki](preview.png)
 
@@ -71,8 +74,9 @@ o.bind("SUPER + W", "Close window or hovered pin", kirinuki .. "/bin/close-hover
 Pins also always have a close button in their hover toolbar, so this is
 convenience, not a requirement.
 
-The plugin replaces nothing. `omarchy-capture-screenshot` and any key still
-bound to it keep working exactly as before; this is a second, parallel path.
+The plugin replaces nothing. `omarchy-capture-screenshot` (omasnap) and any
+key still bound to it keep working exactly as before; this is a second,
+parallel path.
 
 ## Remove
 
@@ -132,23 +136,26 @@ Shipped with Omarchy Quattro, already present on a stock install:
 
 | Command | Used for |
 | --- | --- |
-| `omarchy-capture-screenshot` | Taking the capture |
+| `slurp` | Selecting a region or window |
+| `grim` | Taking the capture |
+| `hyprpicker` | Freezing the screen while you select, so hover states (tooltips, menus, `:hover` styles) are still in the shot |
 | `omarchy-shell` | Summoning the panel over the shell's IPC |
 | `omarchy-notification-send` | Result notifications |
-| `hyprctl` | Pointer position and monitor geometry |
-| `jq` | Reading the plugin id and building the summon payload |
+| `hyprctl` | Pointer position, monitor geometry and window boxes |
+| `jq` | Reading Hyprland's JSON and building the summon payload |
 | `python3` | `bin/open`, the one place a capture is opened (see below); standard library only |
 | `wl-copy` | Clipboard |
-| `tensaku` / `tensaku-edit` | Annotation — Omarchy's default `OMARCHY_SCREENSHOT_EDITOR` |
+| `omasnap` | Annotation — Omarchy 4.5's editor; `tensaku` is used instead where it is still installed, and `OMARCHY_SCREENSHOT_EDITOR` overrides both |
 
-Optional, and **not** part of the Omarchy package set. Install them with your
-package manager if you want these features; without them the plugin runs
-normally and the affected button says what is missing:
+On a stock Omarchy 4.5 install the two below are present too (`imagemagick` in
+the base set, `tesseract` as a dependency of `omasnap`). Older or trimmed
+installs may lack them; the plugin then runs normally, captures are shot live
+(without the hover freeze) and the affected button says what is missing:
 
 | Package | Needed for |
 | --- | --- |
 | `tesseract` plus a language pack (e.g. English) | The OCR button |
-| `imagemagick` | JPEG mode, and copying a JPEG capture to the clipboard as PNG |
+| `imagemagick` | The hover-preserving freeze, JPEG mode, and copying a JPEG capture to the clipboard as PNG |
 
 No sudo or pkexec is required. The plugin runs no installer, installs no
 packages or background services, downloads nothing at runtime, and ships no
