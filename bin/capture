@@ -67,9 +67,31 @@ window_boxes() {
 # The hotkey toggles: pressed again mid-selection, it cancels.
 if pkill -x slurp 2>/dev/null; then exit 0; fi
 
+monitors=$(hyprctl monitors -j)
+
+# Freeze before selecting. slurp's overlay takes the pointer, so the app
+# underneath gets a pointer-leave and drops its hover state (tooltips, menus,
+# :hover styles) before grim could see it. So every output is grabbed first,
+# hyprpicker holds that frozen picture on screen while the user selects, and
+# the selection is cropped out of the grab.
+picker=""
+if [[ $MODE != fullscreen ]]; then
+  frozen=$(mktemp -d "$STAGING/.frozen.XXXXXX") || exit 1
+  trap '[[ -n $picker ]] && kill "$picker" 2>/dev/null; rm -rf -- "$frozen"' EXIT
+  for out in $(jq -r '.[].name' <<<"$monitors"); do
+    grim -o "$out" "$frozen/$out.png" &
+  done
+  wait
+  if command -v hyprpicker >/dev/null 2>&1; then
+    hyprpicker -r -z -d -q >/dev/null 2>&1 &
+    picker=$!
+    sleep 0.1 # let the freeze map before slurp draws over it
+  fi
+fi
+
 case "$MODE" in
   fullscreen)
-    output=$(hyprctl monitors -j | jq -r '.[] | select(.focused) | .name')
+    output=$(jq -r '.[] | select(.focused) | .name' <<<"$monitors")
     geom=""
     ;;
   region) geom=$(slurp 2>/dev/null) ;;
@@ -77,13 +99,34 @@ case "$MODE" in
   smart) geom=$(window_boxes | slurp -o 2>/dev/null) ;;
 esac
 
+if [[ -n $picker ]]; then kill "$picker" 2>/dev/null; picker=""; fi
+
 # slurp exits non-zero when the selection is cancelled: a normal no-op.
 if [[ $MODE != fullscreen && -z $geom ]]; then exit 0; fi
+
+# Logical slurp geometry -> "<output> <physical crop>" on the one unrotated
+# output that holds it, or nothing.
+frozen_crop() {
+  [[ $1 =~ ^(-?[0-9]+),(-?[0-9]+)\ ([0-9]+)x([0-9]+)$ ]] || return 1
+  jq -r --argjson x "${BASH_REMATCH[1]}" --argjson y "${BASH_REMATCH[2]}" \
+    --argjson w "${BASH_REMATCH[3]}" --argjson h "${BASH_REMATCH[4]}" '
+    [.[] | select(.transform == 0)
+      | select($x >= .x and $y >= .y
+          and $x + $w <= .x + .width / .scale + 1
+          and $y + $h <= .y + .height / .scale + 1)
+      | "\(.name) \($w * .scale | round)x\($h * .scale | round)+\(($x - .x) * .scale | round)+\(($y - .y) * .scale | round)"
+    ] | first // empty' <<<"$monitors"
+}
 
 shot="$STAGING/screenshot-$(date +%Y-%m-%d_%H-%M-%S).png"
 if [[ $MODE == fullscreen ]]; then
   grim -o "$output" "$shot" || exit 1
+elif read -r out crop < <(frozen_crop "$geom") && [[ -s $frozen/$out.png ]] &&
+  kirinuki_magick "png:$frozen/$out.png" -crop "$crop" +repage "png:$shot" 2>/dev/null; then
+  :
 else
+  # ponytail: a selection spanning two monitors (or on a rotated one) is shot
+  # live and loses hover; stitch the frozen grabs if that ever matters.
   grim -g "$geom" "$shot" || exit 1
 fi
 
