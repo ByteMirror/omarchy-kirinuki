@@ -78,8 +78,11 @@ monitors=$(hyprctl monitors -j)
 #
 # The grabs are raw PPM: PNG-compressing a 4K frame costs grim ~0.8 s, all of
 # it before slurp can appear; PPM takes ~60 ms and holds the same pixels.
+# The crop needs ImageMagick, which is optional: without it there is nothing
+# to crop with, so selection runs live as before (and hover is lost).
 picker=""
-if [[ $MODE != fullscreen ]]; then
+frozen=""
+if [[ $MODE != fullscreen ]] && command -v magick >/dev/null 2>&1; then
   frozen=$(mktemp -d "$STAGING/.frozen.XXXXXX") || exit 1
   trap '[[ -n $picker ]] && kill "$picker" 2>/dev/null; rm -rf -- "$frozen"' EXIT
   for out in $(jq -r '.[].name' <<<"$monitors"); do
@@ -132,21 +135,31 @@ want_jpg=0
 [[ ${KIRINUKI_JPEG:-0} == 1 ]] && command -v magick >/dev/null 2>&1 && want_jpg=1
 
 shot="$STAGING/screenshot-$(date +%Y-%m-%d_%H-%M-%S).png"
+
+# Writes $shot from the frozen grab; fails when there is none to crop from.
+# In JPEG mode the crop is encoded straight to JPEG: going through PNG first
+# costs up to a second on a full 4K frame for the same pixels.
+crop_frozen() {
+  local out crop
+  [[ -n $frozen ]] || return 1
+  read -r out crop < <(frozen_crop "$geom") && [[ -s $frozen/$out.ppm ]] || return 1
+  if ((want_jpg)); then
+    kirinuki_magick "ppm:$frozen/$out.ppm" -crop "$crop" +repage -background white \
+      -flatten -quality "$QUALITY" "jpg:${shot%.png}.jpg" 2>/dev/null || return 1
+    shot="${shot%.png}.jpg"
+  else
+    kirinuki_magick "ppm:$frozen/$out.ppm" -crop "$crop" +repage "png:$shot" 2>/dev/null
+  fi
+}
+
 if [[ $MODE == fullscreen ]]; then
   grim -o "$output" "$shot" || exit 1
-elif read -r out crop < <(frozen_crop "$geom") && [[ -s $frozen/$out.ppm ]]; then
-  # In JPEG mode the crop is encoded straight to JPEG: going through PNG first
-  # costs up to a second on a full 4K frame for the same pixels.
-  if ((want_jpg)); then
-    shot="${shot%.png}.jpg"
-    kirinuki_magick "ppm:$frozen/$out.ppm" -crop "$crop" +repage \
-      -background white -flatten -quality "$QUALITY" "jpg:$shot" 2>/dev/null || exit 1
-  else
-    kirinuki_magick "ppm:$frozen/$out.ppm" -crop "$crop" +repage "png:$shot" 2>/dev/null || exit 1
-  fi
+elif crop_frozen; then
+  :
 else
-  # ponytail: a selection spanning two monitors (or on a rotated one) is shot
-  # live and loses hover; stitch the frozen grabs if that ever matters.
+  # ponytail: a selection spanning two monitors (or on a rotated one), or any
+  # selection without ImageMagick, is shot live and loses hover; stitch the
+  # frozen grabs if the two-monitor case ever matters.
   grim -g "$geom" "$shot" || exit 1
 fi
 
