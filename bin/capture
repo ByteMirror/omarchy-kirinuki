@@ -101,10 +101,10 @@ if [[ $MODE != fullscreen ]] && command -v magick >/dev/null 2>&1; then
     grim -t ppm -o "$out" "$frozen/$out.ppm" &
   done
   wait
-  # The shell's freeze layer is one static texture per output. hyprpicker
+  # The shell's freeze layer is one screencopy still per output. hyprpicker
   # -r is the fallback when the shell is not running, but it repaints its
   # whole frame continuously, which makes the slurp drag stutter on 4K.
-  if [[ $(OMARCHY_SHELL_IPC_TIMEOUT=1 omarchy-shell kirinuki freeze "$frozen" 2>/dev/null) == ok ]]; then
+  if [[ $(OMARCHY_SHELL_IPC_TIMEOUT=1 omarchy-shell kirinuki freeze 2>/dev/null) == ok ]]; then
     shell_frozen=1
     await_layer kirinuki-freeze
   elif command -v hyprpicker >/dev/null 2>&1; then

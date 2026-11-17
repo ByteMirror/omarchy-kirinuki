@@ -123,8 +123,8 @@ Item {
 
   property string path: ""
   property bool opened: false
-  // Set by bin/capture while slurp runs: a dir of per-output PPM grabs.
-  property string freezeDir: ""
+  // Set by bin/capture while slurp runs.
+  property bool frozen: false
   property real previewX: 0
   property real previewY: 0
   property string monitorName: ""
@@ -329,16 +329,10 @@ Item {
       root.zoomRequested(Number(serial) || 0, f)
       return "ok"
     }
-    // Holds bin/capture's frozen grabs on screen while slurp selects. Only a
-    // .frozen.* dir directly inside the staging dir is accepted.
-    function freeze(dir: string): string {
-      var d = String(dir || "")
-      var prefix = root.pathRoots.length > 0 ? root.pathRoots[0] + "/.frozen." : ""
-      if (prefix === "" || d.indexOf(prefix) !== 0 || d.slice(prefix.length).search(/[\/\u0000\n]/) >= 0) return "rejected"
-      root.freezeDir = d
-      return "ok"
-    }
-    function unfreeze(): string { root.freezeDir = ""; return "ok" }
+    // Holds a still of every output on screen while bin/capture's slurp
+    // selects, so hover states stay visible.
+    function freeze(): string { root.frozen = true; return "ok" }
+    function unfreeze(): string { root.frozen = false; return "ok" }
     function state(): string { return root.opened ? "open" : "closed" }
     function ping(): string { return "ok" }
   }
@@ -752,16 +746,16 @@ Item {
   // Replaces hyprpicker -r as the freeze: hyprpicker repaints its full 4K
   // frame on every frame callback (~50/s, half a core) and Hyprland spends
   // another half core uploading each one, which made slurp's drag stutter.
-  // Here each output is one texture, uploaded once and never redrawn.
+  // Here each output is one screencopy frame, taken once and never redrawn.
   Variants {
-    model: root.freezeDir !== "" ? Quickshell.screens : []
+    model: root.frozen ? Quickshell.screens : []
 
     PanelWindow {
       required property var modelData
 
-      // Mapped only once decoded, so bin/capture can wait for the layer and
-      // know slurp will land on top of a finished picture.
-      visible: frozenImage.status === Image.Ready
+      // Mapped only once the frame is in, so bin/capture can wait for the
+      // layer and know slurp will land on top of a finished picture.
+      visible: still.hasContent
       screen: modelData
       color: "transparent"
       exclusionMode: ExclusionMode.Ignore
@@ -772,12 +766,11 @@ Item {
       WlrLayershell.layer: WlrLayer.Overlay
       WlrLayershell.keyboardFocus: WlrKeyboardFocus.None
 
-      Image {
-        id: frozenImage
+      ScreencopyView {
+        id: still
         anchors.fill: parent
-        source: "file://" + root.freezeDir + "/" + modelData.name + ".ppm"
-        cache: false
-        asynchronous: true
+        captureSource: modelData
+        live: false
       }
     }
   }
