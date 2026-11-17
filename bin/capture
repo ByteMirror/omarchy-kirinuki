@@ -82,23 +82,35 @@ monitors=$(hyprctl monitors -j)
 # to crop with, so selection runs live as before (and hover is lost).
 picker=""
 frozen=""
+shell_frozen=0
+# Wait (capped at 0.5 s) until <namespace> has a layer on every output, so
+# slurp maps after the freeze -- otherwise the freeze covers it.
+await_layer() {
+  local n
+  n=$(jq length <<<"$monitors")
+  for _ in {1..50}; do
+    (($(hyprctl layers -j | jq --arg ns "$1" '[.. | .namespace? | select(. == $ns)] | length') >= n)) && return 0
+    sleep 0.01
+  done
+  return 1
+}
 if [[ $MODE != fullscreen ]] && command -v magick >/dev/null 2>&1; then
   frozen=$(mktemp -d "$STAGING/.frozen.XXXXXX") || exit 1
-  trap '[[ -n $picker ]] && kill "$picker" 2>/dev/null; rm -rf -- "$frozen"' EXIT
+  trap '[[ -n $picker ]] && kill "$picker" 2>/dev/null; ((shell_frozen)) && omarchy-shell kirinuki unfreeze >/dev/null 2>&1; rm -rf -- "$frozen"' EXIT
   for out in $(jq -r '.[].name' <<<"$monitors"); do
     grim -t ppm -o "$out" "$frozen/$out.ppm" &
   done
   wait
-  if command -v hyprpicker >/dev/null 2>&1; then
+  # The shell's freeze layer is one static texture per output. hyprpicker
+  # -r is the fallback when the shell is not running, but it repaints its
+  # whole frame continuously, which makes the slurp drag stutter on 4K.
+  if [[ $(OMARCHY_SHELL_IPC_TIMEOUT=1 omarchy-shell kirinuki freeze "$frozen" 2>/dev/null) == ok ]]; then
+    shell_frozen=1
+    await_layer kirinuki-freeze
+  elif command -v hyprpicker >/dev/null 2>&1; then
     hyprpicker -r -z -d -q >/dev/null 2>&1 &
     picker=$!
-    # slurp must map after the freeze or the freeze covers it. Wait for the
-    # layer (~60 ms), capped at 0.5 s so a hyprpicker that never maps cannot
-    # hold up the selection.
-    for _ in {1..50}; do
-      hyprctl layers -j | jq -e '[.. | .namespace? | select(. == "hyprpicker")] | length > 0' >/dev/null && break
-      sleep 0.01
-    done
+    await_layer hyprpicker
   fi
 fi
 
@@ -113,6 +125,7 @@ case "$MODE" in
 esac
 
 if [[ -n $picker ]]; then kill "$picker" 2>/dev/null; picker=""; fi
+if ((shell_frozen)); then omarchy-shell kirinuki unfreeze >/dev/null 2>&1; shell_frozen=0; fi
 
 # slurp exits non-zero when the selection is cancelled: a normal no-op.
 if [[ $MODE != fullscreen && -z $geom ]]; then exit 0; fi
