@@ -13,6 +13,10 @@ Kirinuki is the clipping; Omarchy's own annotator (omasnap since Omarchy 4.5,
 The screen freezes the moment you press the key, so whatever you were hovering
 — a tooltip, an open menu, a `:hover` style — is still there in the shot.
 
+Click a window instead of dragging a region and the shot comes back framed, the
+way Shottr does it: the window with its rounded corners and a soft shadow,
+centred on your current wallpaper with even padding all round.
+
 ![Kirinuki](preview.png)
 
 Captures stage in `$XDG_RUNTIME_DIR` instead of landing in
@@ -119,6 +123,7 @@ Environment variables, all optional:
 | `KIRINUKI_JPEG_QUALITY` | `92` | JPEG quality when the above is on |
 | `KIRINUKI_STAGING_DIR` | `$XDG_RUNTIME_DIR/kirinuki` | Where captures wait (created private, `0700`) |
 | `KIRINUKI_KEEP_MINUTES` | `1440` | Age at which an unsaved capture is dropped |
+| `KIRINUKI_WINDOW_FRAME` | `1` | Set to `0` to shoot a clicked window bare, without the wallpaper frame |
 | `KIRINUKI_MAX_BYTES` | `67108864` | Largest capture, in bytes, that will be decoded or written |
 | `KIRINUKI_MAX_PIXELS` | `80000000` | Largest capture, in pixels, that will be decoded |
 | `KIRINUKI_MAX_DIMENSION` | `32768` | Longest side, in pixels, that will be decoded |
@@ -138,7 +143,7 @@ Shipped with Omarchy Quattro, already present on a stock install:
 | --- | --- |
 | `slurp` | Selecting a region or window |
 | `grim` | Taking the capture |
-| `hyprpicker` | Freezing the screen while you select, so hover states (tooltips, menus, `:hover` styles) are still in the shot |
+| `hyprpicker` | Freezing the screen while you select when the shell is not running (the panel holds the freeze otherwise), so hover states are still in the shot |
 | `omarchy-shell` | Summoning the panel over the shell's IPC |
 | `omarchy-notification-send` | Result notifications |
 | `hyprctl` | Pointer position, monitor geometry and window boxes |
@@ -155,7 +160,7 @@ installs may lack them; the plugin then runs normally, captures are shot live
 | Package | Needed for |
 | --- | --- |
 | `tesseract` plus a language pack (e.g. English) | The OCR button |
-| `imagemagick` | The hover-preserving freeze, JPEG mode, and copying a JPEG capture to the clipboard as PNG |
+| `imagemagick` | The hover-preserving freeze, the wallpaper frame around a clicked window, JPEG mode, and copying a JPEG capture to the clipboard as PNG |
 
 No sudo or pkexec is required. The plugin runs no installer, installs no
 packages or background services, downloads nothing at runtime, and ships no
