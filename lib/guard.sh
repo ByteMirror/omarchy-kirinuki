@@ -159,6 +159,16 @@ kirinuki_safe_image() {
   "$(kirinuki_open_helper)" "${kirinuki_roots[@]}" -- "${1:-}"
 }
 
+# libvips (in Omarchy's base set) crops and encodes the frozen grab in 8-bit
+# with SIMD, ~3x faster than this Q16-HDRI ImageMagick. Only for grim's own
+# PPM in the private staging dir: vips marks its PPM loader "untrusted", so
+# VIPS_BLOCK_UNTRUSTED cannot be set, and it is never pointed at anything else.
+# Bounded by the same wall clock; its module-loading noise goes to /dev/null.
+kirinuki_vips() {
+  command -v vips >/dev/null 2>&1 || return 1
+  timeout "$KIRINUKI_TIMEOUT" vips "$@" 2>/dev/null
+}
+
 # Every ImageMagick call in this plugin goes through here: bounded, and given
 # its input and output formats explicitly.
 kirinuki_magick() {

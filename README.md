@@ -152,8 +152,8 @@ Shipped with Omarchy Quattro, already present on a stock install:
 | `wl-copy` | Clipboard |
 | `omasnap` | Annotation — Omarchy 4.5's editor; `tensaku` is used instead where it is still installed, and `OMARCHY_SCREENSHOT_EDITOR` overrides both |
 
-On a stock Omarchy 4.5 install the two below are present too (`imagemagick` in
-the base set, `tesseract` as a dependency of `omasnap`). Older or trimmed
+On a stock Omarchy 4.5 install the three below are present too (`imagemagick`
+and `libvips` in the base set, `tesseract` as a dependency of `omasnap`). Older or trimmed
 installs may lack them; the plugin then runs normally, captures are shot live
 (without the hover freeze) and the affected button says what is missing:
 
@@ -161,6 +161,7 @@ installs may lack them; the plugin then runs normally, captures are shot live
 | --- | --- |
 | `tesseract` plus a language pack (e.g. English) | The OCR button |
 | `imagemagick` | The hover-preserving freeze, the wallpaper frame around a clicked window, JPEG mode, and copying a JPEG capture to the clipboard as PNG |
+| `libvips` | Fast crop and encode of the frozen grab (~3x faster than ImageMagick); without it the crop falls back to ImageMagick |
 
 No sudo or pkexec is required. The plugin runs no installer, installs no
 packages or background services, downloads nothing at runtime, and ships no

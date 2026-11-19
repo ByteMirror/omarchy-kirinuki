@@ -67,8 +67,14 @@ window_boxes() {
 # Kirinuki does its own selection with slurp + grim. Omarchy 4.5 moved
 # omarchy-capture-screenshot onto omasnap, whose overlay replaces this
 # plugin's flow -- so Omarchy's capture command is no longer used at all.
-# The hotkey toggles: pressed again mid-selection, it cancels.
-if pkill -x slurp 2>/dev/null; then exit 0; fi
+# The hotkey toggles: pressed again mid-selection, it cancels. pidof, not
+# pkill: pkill reads every process's cmdline (~50 ms on a busy desktop),
+# pidof only their names (~15 ms).
+if slurps=$(pidof slurp); then
+  # shellcheck disable=SC2086 # one pid per word
+  kill $slurps 2>/dev/null
+  exit 0
+fi
 
 monitors=$(hyprctl monitors -j)
 
@@ -96,9 +102,28 @@ await_layer() {
   done
   return 1
 }
+
+# Background window frames (see below): box -> "<pid> <file>".
+declare -A spec=()
+# Kills every background frame job except <keep> ("<pid> <file>", optional).
+# The job's children are signalled too: kirinuki_magick's timeout puts itself
+# in a process group of its own, so only a signal to it reaches magick. They
+# are read from /proc directly -- pkill -P scans every process and costs
+# ~50 ms a job, right between the click and the preview.
+spec_kill() {
+  local job pid kids
+  for job in "${spec[@]}"; do
+    [[ $job == "${1:-}" ]] && continue
+    pid=${job%% *} kids=""
+    read -r kids 2>/dev/null <"/proc/$pid/task/$pid/children"
+    # shellcheck disable=SC2086 # one pid per word
+    kill $kids "$pid" 2>/dev/null
+  done
+}
+
 if [[ $MODE != fullscreen ]] && command -v magick >/dev/null 2>&1; then
   frozen=$(mktemp -d "$STAGING/.frozen.XXXXXX") || exit 1
-  trap '[[ -n $picker ]] && kill "$picker" 2>/dev/null; ((shell_frozen)) && omarchy-shell kirinuki unfreeze >/dev/null 2>&1; rm -rf -- "$frozen"' EXIT
+  trap 'spec_kill; [[ -n $picker ]] && kill "$picker" 2>/dev/null; ((shell_frozen)) && omarchy-shell kirinuki unfreeze >/dev/null 2>&1; rm -rf -- "$frozen"' EXIT
   for out in $(jq -r '.[].name' <<<"$monitors"); do
     grim -t ppm -o "$out" "$frozen/$out.ppm" &
   done
@@ -116,25 +141,6 @@ if [[ $MODE != fullscreen ]] && command -v magick >/dev/null 2>&1; then
   fi
 fi
 
-boxes=""
-[[ $MODE == smart || $MODE == windows ]] && boxes=$(window_boxes)
-
-case "$MODE" in
-  fullscreen)
-    output=$(jq -r '.[] | select(.focused) | .name' <<<"$monitors")
-    geom=""
-    ;;
-  region) geom=$(slurp 2>/dev/null) ;;
-  windows) geom=$(slurp -r <<<"$boxes" 2>/dev/null) ;;
-  smart) geom=$(slurp -o <<<"$boxes" 2>/dev/null) ;;
-esac
-
-if [[ -n $picker ]]; then kill "$picker" 2>/dev/null; picker=""; fi
-if ((shell_frozen)); then omarchy-shell kirinuki unfreeze >/dev/null 2>&1; shell_frozen=0; fi
-
-# slurp exits non-zero when the selection is cancelled: a normal no-op.
-if [[ $MODE != fullscreen && -z $geom ]]; then exit 0; fi
-
 # Logical slurp geometry -> "<output> <physical crop>" on the one unrotated
 # output that holds it, or nothing.
 frozen_crop() {
@@ -151,6 +157,113 @@ frozen_crop() {
 
 want_jpg=0
 [[ ${KIRINUKI_JPEG:-0} == 1 ]] && command -v magick >/dev/null 2>&1 && want_jpg=1
+fmt=png
+((want_jpg)) && fmt=jpg
+
+# Writes the window image <src> (any magick read spec, e.g. a crop of the
+# frozen grab) of window box <box> to <out> as <png|jpg>, framed on the
+# current Omarchy wallpaper -- one encode, since encoding the wallpaper is most
+# of the cost. The window keeps Hyprland's corner radius (scaled to the grab's
+# pixels); the corners in the grab show whatever was behind the window, so
+# they are cut away rather than inherited. Touches nothing but <out>, so it
+# can run in the background.
+frame_render() {
+  local box="$1" src="$2" out_fmt="$3" out="$4" bg w h scale r pad cw ch q
+  local -a enc mask corners=()
+  bg=$(readlink -f -- "$HOME/.local/state/omarchy/current/background") && [[ -f $bg ]] || return 1
+  read -r w h <<<"$(kirinuki_magick "$src" -format '%w %h' info:)"
+  [[ $w =~ ^[0-9]+$ && $h =~ ^[0-9]+$ ]] || return 1
+  # Scale of the output holding the window: grab pixels per logical pixel.
+  scale=$(jq -r --argjson x "${box%%,*}" '[.[] | select($x >= .x and $x < .x + .width / .scale)][0].scale // 1' <<<"$monitors")
+  r=$(hyprctl getoption decoration:rounding -j 2>/dev/null | jq -r ".int * $scale | round" 2>/dev/null)
+  [[ $r =~ ^[0-9]+$ ]] || r=0
+  # ponytail: padding is ~4.25% of the window's long side; make it a knob if
+  # anyone wants Shottr's padding slider.
+  pad=$(((w > h ? w : h) * 1701 / 40000))
+  ((pad < 29)) && pad=29
+  cw=$((w + 2 * pad)) ch=$((h + 2 * pad)) q=$((pad / 4))
+  # zlib level 1: a photo backdrop compresses no better at the default level,
+  # which takes twice as long (~2 s on a 4K window).
+  if [[ $out_fmt == jpg ]]; then
+    enc=(-quality "$QUALITY" "jpg:$out")
+  else
+    enc=(-define png:compression-level=1 "png:$out")
+  fi
+  # The window's corners are cut by four r x r composites of one quarter-disc
+  # mask rather than by masking the whole window: on this Q16-HDRI build every
+  # full-size pass costs ~100 ms. Gravity is pinned inside the mask because it
+  # persists across operators and would move the mask's own crop.
+  if ((r > 0)); then
+    mask=(-gravity northwest -size "$((2 * r))x$((2 * r))" xc:none -fill black
+      -draw "circle $r,$r $r,0" -alpha extract -negate -crop "${r}x${r}+0+0" +repage
+      -background black -alpha shape)
+    corners=(-compose DstOut
+      \( "${mask[@]}" \) -gravity northwest -composite
+      \( "${mask[@]}" -flop \) -gravity northeast -composite
+      \( "${mask[@]}" -flip \) -gravity southwest -composite
+      \( "${mask[@]}" -flip -flop \) -gravity southeast -composite)
+  fi
+  # The shadow is centred, not dropped: an offset makes the bottom padding
+  # read heavier than the top. It is drawn and blurred at quarter size, then
+  # scaled up: a blur that wide hides the resampling, and at full size it
+  # costs seconds. Only its alpha is blurred; the colour is black throughout.
+  kirinuki_magick "$bg" -resize "${cw}x${ch}^" -gravity center -extent "${cw}x${ch}" +repage \
+    \( -size "$((cw / 4))x$((ch / 4))" xc:none -fill 'rgba(0,0,0,0.45)' \
+    -draw "roundrectangle $q,$q,$(((pad + w) / 4)),$(((pad + h) / 4)),$((r / 4)),$((r / 4))" \
+    -channel A -blur "0x$((q / 3 + 1))" +channel -resize "${cw}x${ch}!" \) \
+    -compose over -composite \
+    \( "$src" +repage -alpha set "${corners[@]}" \) \
+    -gravity northwest -geometry "+$pad+$pad" -compose over -composite \
+    "${enc[@]}" 2>/dev/null \
+    && kirinuki_output_ok "$out"
+}
+
+boxes=""
+[[ $MODE == smart || $MODE == windows ]] && boxes=$(window_boxes)
+
+# Framing a window is ~1 s of ImageMagick on a 4K grab -- too slow to start
+# after the click. The boxes and the frozen pixels are both known before slurp
+# opens, so every box is framed in the background while the user is still
+# choosing; by the time a window is clicked its frame is usually done. The
+# jobs are niced so the selection overlay stays smooth, and killed the moment
+# slurp returns anything they did not frame.
+# ponytail: one job per visible window, ~1 core-second each, thrown away on a
+# drawn region; cap the count if busy workspaces ever feel it.
+if [[ ${KIRINUKI_WINDOW_FRAME:-1} == 1 && -n $frozen && -n $boxes ]]; then
+  n=0
+  while IFS= read -r box; do
+    read -r out crop < <(frozen_crop "$box") && [[ -s $frozen/$out.ppm ]] || continue
+    (
+      renice -n 10 -p "$BASHPID" >/dev/null 2>&1
+      frame_render "$box" "ppm:$frozen/$out.ppm[$crop]" "$fmt" "$frozen/spec.$n"
+    ) &
+    spec[$box]="$! $frozen/spec.$n"
+    n=$((n + 1))
+  done <<<"$boxes"
+fi
+
+case "$MODE" in
+  fullscreen)
+    output=$(jq -r '.[] | select(.focused) | .name' <<<"$monitors")
+    geom=""
+    ;;
+  region) geom=$(slurp 2>/dev/null) ;;
+  windows) geom=$(slurp -r <<<"$boxes" 2>/dev/null) ;;
+  smart) geom=$(slurp -o <<<"$boxes" 2>/dev/null) ;;
+esac
+
+if [[ -n $picker ]]; then kill "$picker" 2>/dev/null; picker=""; fi
+# The crop reads the frozen PPM, not the screen, so the freeze layer comes
+# down while the capture is encoded; summon waits for it below.
+unfreezing=""
+if ((shell_frozen)); then
+  omarchy-shell kirinuki unfreeze >/dev/null 2>&1 &
+  unfreezing=$!
+  shell_frozen=0
+fi
+
+# slurp exits non-zero when the selection is cancelled: a normal no-op.
+if [[ $MODE != fullscreen && -z $geom ]]; then exit 0; fi
 
 # A click on a window box (slurp hands back exactly that box) gets the
 # Shottr look: rounded corners and a shadow, centred on the wallpaper. A drawn
@@ -159,57 +272,33 @@ framed=0
 [[ ${KIRINUKI_WINDOW_FRAME:-1} == 1 && -n $geom && -n $boxes ]] \
   && grep -qxF -- "$geom" <<<"$boxes" && command -v magick >/dev/null 2>&1 && framed=1
 
-# Writes the window image <src> (any magick read spec, e.g. a crop of the
-# frozen grab) over $shot, framed on the current Omarchy wallpaper, in the
-# final format -- one encode, since encoding the wallpaper is most of the cost.
-# The window keeps Hyprland's corner radius (scaled to the grab's pixels); the
-# corners in the grab show whatever was behind the window, so they are cut
-# away rather than inherited. Leaves $shot alone on any failure.
+# Only the clicked window's frame is still wanted; free the CPU for it.
+spec_kill "$( ((framed)) && printf '%s' "${spec[$geom]:-}")"
+
+shot="$STAGING/screenshot-$(date +%Y-%m-%d_%H-%M-%S).png"
+
+# Moves a finished frame <file> into place as the capture.
+adopt_frame() {
+  local dest="${shot%.*}.$fmt"
+  mv -fT -- "$1" "$dest" || return 1
+  [[ $dest != "$shot" ]] && rm -f -- "$shot"
+  shot="$dest"
+}
+
+# The clicked window's background frame, once its job has finished cleanly.
+spec_take() {
+  local job="${spec[$geom]:-}"
+  [[ -n $job ]] && wait "${job%% *}" && adopt_frame "${job#* }"
+}
+
+# Frames <src> into $shot synchronously. Leaves $shot alone on any failure.
 frame_window() {
-  local src="$1" bg w h scale r pad cw ch q dest tmp
-  local -a enc
-  bg=$(readlink -f -- "$HOME/.local/state/omarchy/current/background") && [[ -f $bg ]] || return 1
-  read -r w h <<<"$(kirinuki_magick "$src" -format '%w %h' info:)"
-  [[ $w =~ ^[0-9]+$ && $h =~ ^[0-9]+$ ]] || return 1
-  # Scale of the output holding the window: grab pixels per logical pixel.
-  scale=$(jq -r --argjson x "${geom%%,*}" '[.[] | select($x >= .x and $x < .x + .width / .scale)][0].scale // 1' <<<"$monitors")
-  r=$(hyprctl getoption decoration:rounding -j 2>/dev/null | jq -r ".int * $scale | round" 2>/dev/null)
-  [[ $r =~ ^[0-9]+$ ]] || r=0
-  # ponytail: padding is ~4.25% of the window's long side; make it a knob if
-  # anyone wants Shottr's padding slider.
-  pad=$(((w > h ? w : h) * 1701 / 40000))
-  ((pad < 29)) && pad=29
-  cw=$((w + 2 * pad)) ch=$((h + 2 * pad)) q=$((pad / 4))
+  local tmp
   tmp=$(mktemp -- "$STAGING/.frame.XXXXXX") || return 1
-  # zlib level 1: a photo backdrop compresses no better at the default level,
-  # which takes twice as long (~2 s on a 4K window).
-  if ((want_jpg)); then
-    dest="${shot%.*}.jpg" enc=(-quality "$QUALITY" "jpg:$tmp")
-  else
-    dest="${shot%.*}.png" enc=(-define png:compression-level=1 "png:$tmp")
-  fi
-  # The shadow is centred, not dropped: an offset makes the bottom padding
-  # read heavier than the top. It is drawn and blurred at quarter size, then
-  # scaled up: a blur that wide hides the resampling, and at full size it
-  # costs seconds.
-  if kirinuki_magick "$bg" -resize "${cw}x${ch}^" -gravity center -extent "${cw}x${ch}" +repage \
-    \( -size "$((cw / 4))x$((ch / 4))" xc:none -fill 'rgba(0,0,0,0.45)' \
-    -draw "roundrectangle $q,$q,$(((pad + w) / 4)),$(((pad + h) / 4)),$((r / 4)),$((r / 4))" \
-    -blur "0x$((q / 3 + 1))" -resize "${cw}x${ch}!" \) \
-    \( "$src" +repage -alpha set \( +clone -alpha transparent -fill white \
-    -draw "roundrectangle 0,0,$((w - 1)),$((h - 1)),$r,$r" \) -compose DstIn -composite \
-    -repage "+$pad+$pad" \) \
-    -compose over -gravity northwest -flatten "${enc[@]}" 2>/dev/null \
-    && kirinuki_output_ok "$tmp" && mv -fT -- "$tmp" "$dest"; then
-    [[ $dest != "$shot" ]] && rm -f -- "$shot"
-    shot="$dest"
-    return 0
-  fi
+  frame_render "$geom" "$1" "$fmt" "$tmp" && adopt_frame "$tmp" && return 0
   rm -f -- "$tmp"
   return 1
 }
-
-shot="$STAGING/screenshot-$(date +%Y-%m-%d_%H-%M-%S).png"
 
 # Writes $shot from the frozen grab; fails when there is none to crop from.
 # In JPEG mode the crop is encoded straight to JPEG: going through PNG first
@@ -219,25 +308,43 @@ crop_frozen() {
   [[ -n $frozen ]] || return 1
   read -r out crop < <(frozen_crop "$geom") && [[ -s $frozen/$out.ppm ]] || return 1
   # Read-crop straight out of the PPM: no intermediate file to encode.
-  ((framed)) && frame_window "ppm:$frozen/$out.ppm[$crop]" && return 0
+  if ((framed)); then
+    spec_take && return 0
+    frame_window "ppm:$frozen/$out.ppm[$crop]" && return 0
+  fi
+  # vips first (~80 ms for a 4K-ish JPEG, where magick takes ~270 ms);
+  # magick is the fallback. PNG goes out at zlib level 1 with the sub filter:
+  # ~4% larger than the default level, which cost a full second.
+  local cw ch cx cy
+  IFS='x+' read -r cw ch cx cy <<<"$crop"
   if ((want_jpg)); then
-    kirinuki_magick "ppm:$frozen/$out.ppm" -crop "$crop" +repage -background white \
-      -flatten -quality "$QUALITY" "jpg:${shot%.png}.jpg" 2>/dev/null || return 1
+    kirinuki_vips crop "$frozen/$out.ppm" "${shot%.png}.jpg[Q=$QUALITY]" "$cx" "$cy" "$cw" "$ch" \
+      || kirinuki_magick "ppm:$frozen/$out.ppm[$crop]" -quality "$QUALITY" \
+        "jpg:${shot%.png}.jpg" 2>/dev/null || return 1
     shot="${shot%.png}.jpg"
   else
-    kirinuki_magick "ppm:$frozen/$out.ppm" -crop "$crop" +repage "png:$shot" 2>/dev/null
+    kirinuki_vips crop "$frozen/$out.ppm" "$shot[compression=1,filter=sub]" "$cx" "$cy" "$cw" "$ch" \
+      || kirinuki_magick "ppm:$frozen/$out.ppm[$crop]" -define png:compression-level=1 \
+        "png:$shot" 2>/dev/null
   fi
 }
 
 if [[ $MODE == fullscreen ]]; then
-  grim -o "$output" "$shot" || exit 1
+  # grim encodes the final format itself: ~80 ms for a 4K JPEG, where a PNG at
+  # grim's default level (~0.5 s) plus a transcode after it cost ~1 s.
+  if ((want_jpg)); then
+    grim -t jpeg -q "$QUALITY" -o "$output" "${shot%.png}.jpg" || exit 1
+    shot="${shot%.png}.jpg"
+  else
+    grim -l 1 -o "$output" "$shot" || exit 1
+  fi
 elif crop_frozen; then
   :
 else
   # ponytail: a selection spanning two monitors (or on a rotated one), or any
   # selection without ImageMagick, is shot live and loses hover; stitch the
   # frozen grabs if the two-monitor case ever matters.
-  grim -g "$geom" "$shot" || exit 1
+  grim -l 1 -g "$geom" "$shot" || exit 1
   ((framed)) && frame_window "png:$shot"
 fi
 
@@ -272,6 +379,7 @@ fi
 # stock behaviour: keep the file and say where it went. Save and copy both
 # happen beneath one bin/open, from the one descriptor, and only then is the
 # staged copy dropped.
+[[ -n $unfreezing ]] && wait "$unfreezing"
 if ! "$here/summon" "$shot"; then
   if dest=$(kirinuki_with_fd "$shot" kirinuki_promote "$(basename "$shot")" "$(kirinuki_screenshot_dir)"); then
     rm -f -- "$shot"
