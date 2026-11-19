@@ -77,12 +77,19 @@ src="$tmpdir/$base.png"   # what the editor is shown
 png="$tmpdir/$base.out.png" # what Tensaku writes
 self=$(readlink -f -- "$0")
 
-# The editor's copy, from the descriptor. A JPEG is flattened onto white on
-# the way in, so the editor works on the same pixels the fold-back produces.
+# The editor's copy, from the descriptor. omasnap is Qt and reads JPEG
+# natively, so it gets the capture's own bytes: transcoding a 4K JPEG to PNG
+# first cost ~2.7 s between Enter and the editor appearing (and JPEG has no
+# alpha, so there is nothing to flatten). Other editors get PNG at zlib
+# level 1 -- the scratch copy is thrown away, compression only buys latency.
 if [[ $fmt == png ]]; then
   cat -- "/dev/fd/$fd" >"$src" || exit 1
+elif [[ $EDITOR_CMD == omasnap ]]; then
+  src="$tmpdir/$base.jpg"
+  cat -- "/dev/fd/$fd" >"$src" || exit 1
 else
-  kirinuki_magick "jpg:/dev/fd/$fd" -background white -flatten "png:$src" 2>/dev/null || exit 1
+  kirinuki_magick "jpg:/dev/fd/$fd" -background white -flatten \
+    -define png:compression-level=1 "png:$src" 2>/dev/null || exit 1
 fi
 kirinuki_output_ok "$src" || exit 1
 
@@ -97,7 +104,8 @@ kirinuki_output_ok "$src" || exit 1
 fold_back() {
   local edited="$1" staged
   kirinuki_output_ok "$edited" || return 1
-  if [[ $fmt == png ]]; then
+  # Same format in and out (incl. omasnap's untouched scratch JPEG): plain copy.
+  if [[ $fmt == png || $edited == *.jpg ]]; then
     cat -- "$edited" >"/dev/fd/$fd" || return 1
   else
     staged="$tmpdir/$base.fold.jpg"
